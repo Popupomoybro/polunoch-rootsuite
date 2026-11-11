@@ -8,10 +8,19 @@
 #import <netinet/in.h>
 #import <sys/stat.h>
 #import <xpc/xpc.h>
-#import <IOSurface/IOSurface.h>
+// IOSurface: not importable from the plain iOS SDK; declare the three symbols.
+#import <CoreFoundation/CoreFoundation.h>
+typedef struct __IOSurface *IOSurfaceRef;
+extern IOSurfaceRef IOSurfaceCreate(CFDictionaryRef dictionary);
+extern size_t IOSurfaceGetAllocSize(IOSurfaceRef buffer);
+#define kIOSurfaceWidth CFSTR("IOSurfaceWidth")
+#define kIOSurfaceHeight CFSTR("IOSurfaceHeight")
+#define kIOSurfaceBytesPerElement CFSTR("IOSurfaceBytesPerElement")
 #import <IOKit/IOKitLib.h>
 #import <IOKit/IOTypes.h>
 #import <IOKit/hidsystem/IOHIDEventSystemClient.h>
+#import <spawn.h>
+#import <sys/wait.h>
 #import <stdio.h>
 #import <stdlib.h>
 #import <string.h>
@@ -94,7 +103,7 @@ NSString *ModSandboxEscape(void) {
     groupv[0] = NULL;
     groupv[1] = grp.UTF8String;
     int live = 0, rd = 0, wr = 0;
-    NSString *winner = @"нет живого хэндла";
+    NSString *winner = @"no live handle";
     for (int g = 0; g < 2; g++) {
         for (int f = 0; f < 5; f++) {
             int64_t ph = -1; uint64_t pp = 0; int pd = 0;
@@ -117,7 +126,7 @@ NSString *ModSandboxEscape(void) {
         }
     }
     RootSetObtained(NO);
-    return S(@"эскейп: live=%d read=%d write=%d [%@] root=НЕТ", live, rd, wr, winner);
+    return S(@"escape: live=%d read=%d write=%d [%@] root=NO", live, rd, wr, winner);
 }
 
 // ---------------------------------------------------------------------------
@@ -148,8 +157,8 @@ NSString *ModRootFiles(void) {
         AveLog(S(@"    READ %-16s n=%zd fnv=%08x head=%.24s", rf[i].tag, n, h, (const char *)b));
         if (strcmp(rf[i].tag, "master.passwd") == 0 && n > 0) RootSetObtained(YES);
     }
-    return S(@"прочитано %d, отказано %d %s", ok, denied,
-             RootWasObtained() ? "(master.passwd — это root-уровень!)" : "");
+    return S(@"read %d, denied %d %s", ok, denied,
+             RootWasObtained() ? "(master.passwd - root level access!)" : "");
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +183,7 @@ static long sysctlInt(const char *name, long def) {
 NSString *ModKernelPosture(void) {
     NSMutableString *out = [NSMutableString string];
     NSString *bootargs = sysctlStr("kern.bootargs");
-    [out appendFormat:@"bootargs=%@ ", bootargs ?: @"(пусто)"];
+    [out appendFormat:@"bootargs=%@ ", bootargs ?: @"()"];
     BOOL amfi = sysctlInt("security.mac.amfi.developer_mode_high_version_level", -1);
     [out appendFormat:@"AMFI_dev=%ld ", amfi];
     uint32_t csr = 0;
@@ -188,10 +197,10 @@ NSString *ModKernelPosture(void) {
     [out appendFormat:@"tfp0_allow=%ld ", tfp0];
     BOOL unrestrictedFs = sysctlInt("security.mac.unrestrictfs", -1);
     [out appendFormat:@"unrestrictfs=%ld ", unrestrictedFs];
-    AveLog([NSString stringWithFormat:@"    постуренс: %@", out]);
+    AveLog([NSString stringWithFormat:@"    posture: %@", out]);
     BOOL interesting = [bootargs containsString:@"amfi_get_out_of_my_way=1"] ||
                        unrestrictedFs == 1 || tfp0 == 1 || ramdisk > 0;
-    return S(@"ядерный постуренс: %@%@", out, interesting ? @" ← есть открытые пути" : @"");
+    return S(@" posture: %@%@", out, interesting ? @"    " : @"");
 }
 
 // ---------------------------------------------------------------------------
@@ -222,17 +231,17 @@ NSString *ModPrivilegedServices(void) {
             mach_port_deallocate(mach_task_self(), sp);
         } else {
             refused++;
-            AveLog(S(@"    —     %-40s kr=%#x", svcs[i].name, kr));
+            AveLog(S(@"         %-40s kr=%#x", svcs[i].name, kr));
         }
     }
-    return S(@"Mach-сервисы: открыто %d, отказано %d", open_, refused);
+    return S(@"Mach services: open %d, denied %d", open_, refused);
 }
 
 // ---------------------------------------------------------------------------
 // 5. IOSurface format-class probe (finding #6)
 // ---------------------------------------------------------------------------
 NSString *ModIOSurface(void) {
-    AveLog(@"    probe: создаю поверхности разных форматов");
+    AveLog(@"    probe:    ");
     struct { const char *name; unsigned w, h; int bpe; } F[] = {
         {"BGRA", 256, 256, 4}, {"420f", 1024, 1024, 1}, {"y420", 256, 256, 4},
         {"rgbf", 1024, 1024, 1}, {"2vuy", 256, 256, 4}, {"l008", 1024, 1024, 1},
@@ -258,17 +267,17 @@ NSString *ModIOSurface(void) {
 // ---------------------------------------------------------------------------
 NSString *ModAVE2(void) {
     CFMutableDictionaryRef m = IOServiceMatching("AppleAVE2");
-    if (!m) return @"IOServiceMatching(AppleAVE2) не создался";
+    if (!m) return @"IOServiceMatching(AppleAVE2) failed";
     io_service_t d = IOServiceGetMatchingService(kIOMainPortDefault, m);
-    if (!d) return @"AppleAVE2 сервис не найден";
+    if (!d) return @"AppleAVE2 service not found";
     io_connect_t c = 0;
     kern_return_t kr = IOServiceOpen(d, mach_task_self(), 0, &c);
     IOServiceObject(d);
     if (kr == KERN_SUCCESS && c) {
         IOServiceClose(c);
-        return @"AVE2 user client ОТКРЫТ (неожиданно)";
+        return @"AVE2 user client OPEN  (unexpected)";
     }
-    return S(@"AVE2 user client закрыт (IOServiceOpen kr=%#x)", kr);
+    return S(@"AVE2 user client closed (IOServiceOpen kr=%#x)", kr);
 }
 
 // ---------------------------------------------------------------------------
@@ -276,13 +285,13 @@ NSString *ModAVE2(void) {
 // ---------------------------------------------------------------------------
 NSString *ModIOHID(void) {
     IOHIDEventSystemClientRef sys = IOHIDEventSystemClientCreate(kCFAllocatorDefault);
-    if (!sys) return @"IOHIDEventSystemClientCreate не создался";
+    if (!sys) return @"IOHIDEventSystemClientCreate  ";
     CFArrayRef svcs = IOHIDEventSystemClientCopyServices(sys);
     int n = svcs ? (int)CFArrayGetCount(svcs) : 0;
     io_service_t dummy = 0; (void)dummy;
     if (svcs) CFRelease(svcs);
     CFRelease(sys);
-    return S(@"IOHID: сервисов видно %d (user client отсутствует — инъекция закрыта песочницей)", n);
+    return S(@"IOHID:   %d (user client absent - injection gated by the sandbox)", n);
 }
 
 // ---------------------------------------------------------------------------
@@ -306,7 +315,7 @@ NSString *ModGPU(void) {
     }];
     dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
     [wv stopLoading]; wv = nil;
-    return S(@"WebGL: %@ %@", ver ?: @"нет ответа", rend ?: @"");
+    return S(@"WebGL: %@ %@", ver ?: @"no answer", rend ?: @"");
 }
 
 // ---------------------------------------------------------------------------
@@ -314,24 +323,24 @@ NSString *ModGPU(void) {
 // ---------------------------------------------------------------------------
 NSString *ModIOSkywalk(void) {
     int s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (s < 0) return S(@"IOSkywalk: сокет не открылся (errno=%d)", errno);
+    if (s < 0) return S(@"IOSkywalk: socket could not open (errno=%d)", errno);
     close(s);
-    return @"IOSkywalk: UDP-сокет доступен; триггер varint требует кадр с LAN — НЕ запущен";
+    return @"IOSkywalk: UDP socket open; varint trigger needs a LAN frame - NOT fired";
 }
 
 NSString *ModND6(void) {
     int s = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
-    if (s >= 0) { close(s); return @"ND6: raw ICMPv6 доступен (требует LAN)"; }
-    return S(@"ND6: raw ICMPv6 закрыт (errno=%d) — требуется другой хост в LAN", errno);
+    if (s >= 0) { close(s); return @"ND6: raw ICMPv6 open (LAN required)"; }
+    return S(@"ND6: raw ICMPv6 closed (errno=%d) - another LAN host needed", errno);
 }
 
 NSString *ModHFS(void) {
     // read-only reachability: does the HFS kext expose a mount path to us?
-    return @"HFS flag-nibble: evidence from the kernel diff (5/5 vs 0/5); mount-path закрыт allowlist";
+    return @"HFS flag-nibble: evidence from the kernel diff (5/5 vs 0/5); mount path gated by allowlist";
 }
 
 NSString *ModCoreDevice(void) {
-    return @"CoreDevice launchapplication: сервис недоступен из приложения (это host-side канал)";
+    return @"CoreDevice launchapplication: service not available from inside the app (host-side channel)";
 }
 
 // ---------------------------------------------------------------------------
@@ -358,28 +367,29 @@ NSString *ModBlSbx(void) {
         if (r == 0 || w == 0) reach++;
     }
     // the actual public trigger uses bookassetd's download path; report the state
-    AveSetStatus(reach ? @"bl_sbx: путь найден" : @"bl_sbx: путь закрыт");
-    return S(@"bl_sbx: достижимо %d/3 (запись от имени mobile — НЕ root; нужен kernel-шаг)", reach);
+    AveSetStatus(reach ? @"bl_sbx: reachable" : @"bl_sbx: blocked");
+    return S(@"bl_sbx: reachable %d/3 (write as mobile - NOT root; a kernel step is needed)", reach);
 }
 
 // ---------------------------------------------------------------------------
 // dispatcher used by the UI
 // ---------------------------------------------------------------------------
 NSString *RunModule(NSString *name) {
-    if ([name hasPrefix:@"Песочница"])   return ModSandboxEscape();
+    if ([name hasPrefix:@"worse_query"]) return ModWorseQuery();
     if ([name hasPrefix:@"bl_sbx"])      return ModBlSbx();
-    if ([name hasPrefix:@"Чтение"])      return ModRootFiles();
-    if ([name hasPrefix:@"WebKit"])      return ModWebKitUAF();
-    if ([name hasPrefix:@"dyld"])        return ModDyldOracle();
-    if ([name hasPrefix:@"IOHID"])       return ModIOHID();
-    if ([name hasPrefix:@"IOSurface"])   return ModIOSurface();
-    if ([name hasPrefix:@"AVE2"])        return ModAVE2();
-    if ([name hasPrefix:@"Ядерный"])     return ModKernelPosture();
-    if ([name hasPrefix:@"GPU"])         return ModGPU();
-    if ([name hasPrefix:@"Привилегированные"]) return ModPrivilegedServices();
+    if ([name hasPrefix:@"Sandbox"])       return ModSandboxEscape();
+    if ([name hasPrefix:@"Root-owned"])    return ModRootFiles();
+    if ([name hasPrefix:@"WebKit"])        return ModWebKitUAF();
+    if ([name hasPrefix:@"dyld"])          return ModDyldOracle();
+    if ([name hasPrefix:@"IOHID"])         return ModIOHID();
+    if ([name hasPrefix:@"IOSurface"])     return ModIOSurface();
+    if ([name hasPrefix:@"AVE2"])          return ModAVE2();
+    if ([name hasPrefix:@"Kernel"])        return ModKernelPosture();
+    if ([name hasPrefix:@"GPU"])           return ModGPU();
+    if ([name hasPrefix:@"Privileged"])    return ModPrivilegedServices();
     if ([name hasPrefix:@"IOSkywalk"])   return ModIOSkywalk();
     if ([name hasPrefix:@"ND6"])         return ModND6();
     if ([name hasPrefix:@"HFS"])         return ModHFS();
     if ([name hasPrefix:@"CoreDevice"])  return ModCoreDevice();
-    return @"модуль не найден";
+    return @"module not found";
 }

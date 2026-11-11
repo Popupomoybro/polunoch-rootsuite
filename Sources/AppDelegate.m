@@ -280,6 +280,7 @@ static void refreshRootPill(void) {
 
     self.modules = [NSMutableArray array];
 #define ADD(n, d, s, sel) [self.modules addObject:@{@"name":@(n), @"desc":@(d), @"status":s, @"block":[^{ return RunModule(@(n)); } copy], @"auto":@(sel)}]
+    ADD("worse_query container escape", "PUBLIC/UNPATCHED: R/W in every app container (26.0-26.7.2)", @"PUBLIC", YES);
     ADD("Sandbox: bad_query escape", "READ grants on /System and /usr/lib - live probe", @"PROVEN", YES);
     ADD("bl_sbx: itunesstored", "PUBLIC exploit: write as uid 501, listed for 26.2b1", @"PUBLIC", YES);
     ADD("Root-owned file read", "SystemVersion, Keychains, master.passwd - proof of access", @"PROVEN", YES);
