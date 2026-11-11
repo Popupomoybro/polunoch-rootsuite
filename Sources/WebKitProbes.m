@@ -7,6 +7,7 @@
 #import <stdio.h>
 #import "Modules.h"
 #import "AppDelegate.h"
+#import "Util.h"
 
 // ---------------------------------------------------------------------------
 // WebKit DFG store-barrier UAF (CVE-2025-43529) — proven on 23C5027f at round 112.

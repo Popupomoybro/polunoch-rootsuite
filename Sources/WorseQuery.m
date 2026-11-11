@@ -1,5 +1,14 @@
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <dlfcn.h>
+#import <xpc/xpc.h>
+#import <sys/stat.h>
+#import "Modules.h"
+#import "AppDelegate.h"
+#import "Util.h"
+
 // ---------------------------------------------------------------------------
-// worse_query (forcequitOS) — PUBLIC, UNPATCHED container escape.
+// worse_query (forcequitOS) - PUBLIC, UNPATCHED container escape.
 // PoC coverage: iOS 26.0 - 26.7.2 and 27.2 (fixed only in 26.7.3 / 27.2.1, 9 Nov 2026).
 //
 //   Gives: read+write of every Application container, InternalDaemon,

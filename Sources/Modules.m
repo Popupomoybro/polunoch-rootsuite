@@ -18,7 +18,10 @@ extern size_t IOSurfaceGetAllocSize(IOSurfaceRef buffer);
 #define kIOSurfaceBytesPerElement CFSTR("IOSurfaceBytesPerElement")
 #import <IOKit/IOKitLib.h>
 #import <IOKit/IOTypes.h>
-#import <IOKit/hidsystem/IOHIDEventSystemClient.h>
+// IOHID: the hidsystem headers are not in the plain iOS SDK; declare the API.
+typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
+extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
+extern CFArrayRef IOHIDEventSystemClientCopyServices(IOHIDEventSystemClientRef client);
 #import <spawn.h>
 #import <sys/wait.h>
 #import <stdio.h>
@@ -27,21 +30,23 @@ extern size_t IOSurfaceGetAllocSize(IOSurfaceRef buffer);
 #import <stdarg.h>
 #import <servers/bootstrap.h>
 #import <unistd.h>
+#import <spawn.h>
+#import <sys/wait.h>
+// IOHID: the hidsystem headers are not in the plain iOS SDK; declare the API.
+typedef struct __IOHIDEventSystemClient *IOHIDEventSystemClientRef;
+extern IOHIDEventSystemClientRef IOHIDEventSystemClientCreate(CFAllocatorRef allocator);
+extern CFArrayRef IOHIDEventSystemClientCopyServices(IOHIDEventSystemClientRef client);
 #import <fcntl.h>
 #import <errno.h>
+#import <stdarg.h>
 #import "Modules.h"
 #import "Root.h"
+#import "Util.h"
 
 // Every module is a probe/attempt that measures reality on THIS build and reports.
 // They are ordered from "cheapest and safest" to "heavier": the UI runs them on a
 // background queue so the interface never stutters.
 
-static NSString *S(NSString *f, ...) {
-    va_list ap; va_start(ap, f);
-    NSString *s = [[NSString alloc] initWithFormat:f arguments:ap];
-    va_end(ap);
-    return s;
-}
 
 // ---------------------------------------------------------------------------
 // 1. sandbox escape — the exact bad_query recipe proven on this device
