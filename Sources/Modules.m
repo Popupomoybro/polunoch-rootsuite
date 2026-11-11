@@ -28,7 +28,11 @@ extern CFArrayRef IOHIDEventSystemClientCopyServices(IOHIDEventSystemClientRef c
 #import <stdlib.h>
 #import <string.h>
 #import <stdarg.h>
-#import <servers/bootstrap.h>
+// bootstrap_look_up is declared in a header that is not in the plain iOS SDK.
+extern kern_return_t bootstrap_look_up(mach_port_t bootstrap_port,
+                                        const char *service_name,
+                                        mach_port_t *server_port);
+extern kern_return_t task_get_bootstrap_port(task_t task, mach_port_t *bootstrap_port);
 #import <unistd.h>
 #import <spawn.h>
 #import <sys/wait.h>
