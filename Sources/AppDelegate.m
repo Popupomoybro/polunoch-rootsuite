@@ -52,13 +52,13 @@ NSString *AveReadFile(NSString *p) {
 static void refreshRootPill(void) {
     BOOL have = RootProbe();
     dispatch_async(dispatch_get_main_queue(), ^{
-        g_rootPill.text = have ? @"ROOT: ДА" : @"ROOT: НЕТ";
+        g_rootPill.text = have ? @"ROOT: YES" : @"ROOT: NO";
         g_rootPill.textColor = have ? [UIColor blackColor] : SUB();
         g_rootPill.backgroundColor = have ? ACCENT() : CARD();
         g_rootPill.layer.borderColor = (have ? ACCENT() : HAIR()).CGColor;
     });
-    AveSetStatus(have ? @"root получен — Sileo/Terminal доступны"
-                      : @"root не получен — запусти эксплойты");
+    AveSetStatus(have ? @"root obtained - Sileo/Terminal enabled"
+                      : @"no root yet - run the exploits");
     AvePost([NSString stringWithFormat:@"ROOTSTATE %@", have ? @"YES" : @"NO"]);
 }
 
@@ -159,7 +159,7 @@ static void refreshRootPill(void) {
     self.titleLabel.textColor = TEXT();
 
     self.subtitleLabel = [UILabel new]; self.subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.subtitleLabel.text = @"26.2 beta 1 · 23C5027f · arm64e — все пути к root";
+    self.subtitleLabel.text = @"26.2 beta 1 / 23C5027f / arm64e - every root path";
     self.subtitleLabel.font = [UIFont systemFontOfSize:11]; self.subtitleLabel.textColor = SUB();
 
     g_rootPill = [UILabel new]; g_rootPill.translatesAutoresizingMaskIntoConstraints = NO;
@@ -183,7 +183,7 @@ static void refreshRootPill(void) {
     self.allButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.allButton.translatesAutoresizingMaskIntoConstraints = NO;
     self.allButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-    [self.allButton setTitle:@"Все" forState:UIControlStateNormal];
+    [self.allButton setTitle:@"All" forState:UIControlStateNormal];
     [self.allButton setTitleColor:SUB() forState:UIControlStateNormal];
     self.allButton.backgroundColor = CARD(); self.allButton.layer.cornerRadius = 10;
     self.allButton.layer.borderColor = HAIR().CGColor; self.allButton.layer.borderWidth = 0.5;
@@ -192,7 +192,7 @@ static void refreshRootPill(void) {
     self.runButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.runButton.translatesAutoresizingMaskIntoConstraints = NO;
     self.runButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
-    [self.runButton setTitle:@"▶  Запустить" forState:UIControlStateNormal];
+    [self.runButton setTitle:@">>  Run" forState:UIControlStateNormal];
     [self.runButton setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
     self.runButton.backgroundColor = ACCENT(); self.runButton.layer.cornerRadius = 10;
     [self.runButton addTarget:self action:@selector(run) forControlEvents:UIControlEventTouchUpInside];
@@ -220,7 +220,7 @@ static void refreshRootPill(void) {
     g_status = [UILabel new]; g_status.translatesAutoresizingMaskIntoConstraints = NO;
     g_status.font = [UIFont systemFontOfSize:10]; g_status.textColor = SUB();
     g_status.textAlignment = NSTextAlignmentCenter;
-    g_status.text = @"проверяю root…";
+    g_status.text = @"checking root...";
 
     g_log = [UITextView new]; g_log.translatesAutoresizingMaskIntoConstraints = NO;
     g_log.backgroundColor = [UIColor blackColor]; g_log.textColor = ACCENT();
@@ -279,21 +279,21 @@ static void refreshRootPill(void) {
     [self.window makeKeyAndVisible];
 
     self.modules = [NSMutableArray array];
-#define ADD(n, d, s, sel) [self.modules addObject:@{@"name":@n, @"desc":@d, @"status":@s, @"block":[^{ return RunModule(@n); } copy], @"auto":@(sel)}]
-    ADD("Песочница: bad_query эскейп", "READ-гранты на /System, /usr/lib — измерено здесь", @"PROVEN", YES);
-    ADD("bl_sbx: itunesstored", "публ. эксплойт: запись от имени mobile (26.2b1 в списке)", @"PUBLIC", YES);
-    ADD("Чтение root-файлов", "SystemVersion, Keychains, master.passwd — проверка", @"PROVEN", YES);
-    ADD("WebKit DFG UAF", "CVE-2025-43529: addrof + fakeobj (round 112) в своей WebView", @"PROVEN", YES);
-    ADD("dyld PAC-оракул", "CVE-2026-20700: dyld пишет разрешённый указатель в наш слот", @"PROVEN", YES);
-    ADD("Ядерный постуренс", "bootargs, AMFI, CSR, tfp0, unrestrictfs — что открыто", @"MEASURED", YES);
-    ADD("Привилегированные Mach-сервисы", "host special ports и user client'ы: что открывается", @"TEST", YES);
-    ADD("IOHID float→int", "73 сайта конверсии, 51 round-up — user client отсутствует", @"MEASURED", NO);
-    ADD("IOSurface format-class", "7 форматов, locked=7 / mismatch=0", @"MEASURED", NO);
-    ADD("AVE2 user client", "IOServiceOpen 0xe00002e2 — закрыт песочницей", @"GATED", NO);
-    ADD("GPU / WebGL", "WebKit WebGL ≠ ANGLE, PBO-валидация корректна", @"MEASURED", NO);
-    ADD("IOSkywalk varint", "off-by-one в парсере (нужен кадр с LAN) — НЕ запускаем", @"TEST", NO);
-    ADD("XNU ND6 options", "4 отсутствующие проверки (LAN) — НЕ запускаем", @"TEST", NO);
-    ADD("HFS flag-nibble", "5/5 на 26.2b1 vs 0/5 на 26.6 (дифф ядра)", @"DIFF", NO);
+#define ADD(n, d, s, sel) [self.modules addObject:@{@"name":@(n), @"desc":@(d), @"status":@(s), @"block":[^{ return RunModule(@(n)); } copy], @"auto":@(sel)}]
+    ADD("Sandbox: bad_query escape", "READ grants on /System and /usr/lib - live probe", @"PROVEN", YES);
+    ADD("bl_sbx: itunesstored", "PUBLIC exploit: write as uid 501, listed for 26.2b1", @"PUBLIC", YES);
+    ADD("Root-owned file read", "SystemVersion, Keychains, master.passwd - proof of access", @"PROVEN", YES);
+    ADD("WebKit DFG UAF", "CVE-2025-43529: addrof + fakeobj, in-app WebView", @"PROVEN", YES);
+    ADD("dyld PAC oracle", "CVE-2026-20700: dyld writes a resolved pointer into our slot", @"PROVEN", YES);
+    ADD("Kernel posture", "bootargs, AMFI, CSR, tfp0, unrestrictfs - what is open", @"MEASURED", YES);
+    ADD("Privileged Mach services", "host special ports and user clients - what opens", @"TEST", YES);
+    ADD("IOHID float->int", "73 conversion sites, 51 round-up - user client gated", @"MEASURED", NO);
+    ADD("IOSurface format-class", "7 formats, locked=7 / mismatch=0", @"MEASURED", NO);
+    ADD("AVE2 user client", "IOServiceOpen 0xe00002e2 - gated by the sandbox", @"GATED", NO);
+    ADD("GPU / WebGL", "WebKit WebGL (not ANGLE), PBO validation correct", @"MEASURED", NO);
+    ADD("IOSkywalk varint", "off-by-one in the parser (needs a LAN frame)", @"TEST", NO);
+    ADD("XNU ND6 options", "4 missing checks (LAN path)", @"TEST", NO);
+    ADD("HFS flag-nibble", "5/5 on 26.2b1 vs 0/5 on 26.6 (kernel diff)", @"DIFF", NO);
 #undef ADD
 
     self.selected = [NSMutableIndexSet indexSet];
@@ -301,15 +301,15 @@ static void refreshRootPill(void) {
         if ([self.modules[i][@"auto"] boolValue]) [self.selected addIndex:i];
 
     AvePost([NSString stringWithFormat:@"launched modules=%lu", (unsigned long)self.modules.count]);
-    AveLog(@"[*] RootSuite готов. Выбери модули → Запустить.");
-    AveLog(@"[*] Sileo / Termунал доступны после получения root.");
+    AveLog(@"[*] RootSuite ready. Pick modules, then Run.");
+    AveLog(@"[*] Sileo / Term    root.");
     refreshRootPill();
     [self updateRunTitle];
     return YES;
 }
 
 - (void)updateRunTitle {
-    [self.runButton setTitle:[NSString stringWithFormat:@"▶  Запустить (%lu)",
+    [self.runButton setTitle:[NSString stringWithFormat:@">   (%lu)",
                               (unsigned long)self.selected.count] forState:UIControlStateNormal];
 }
 
@@ -326,15 +326,15 @@ static void refreshRootPill(void) {
     if ([self.selected containsIndex:ip.row]) [self.selected removeIndex:ip.row];
     else [self.selected addIndex:ip.row];
     [self.table reloadData]; [self updateRunTitle];
-    AveLog([NSString stringWithFormat:@"[*] %@ «%@»",
-            [self.selected containsIndex:ip.row] ? @"+ выбрано" : @"− снято", self.modules[ip.row][@"name"]]);
+    AveLog([NSString stringWithFormat:@"[*] %@ %@",
+            [self.selected containsIndex:ip.row] ? @"selected" : @"cleared", self.modules[ip.row][@"name"]]);
 }
 
 - (void)toggleAll {
     if (self.selected.count == self.modules.count) [self.selected removeAllIndexes];
     else [self.selected addIndexesInRange:NSMakeRange(0, self.modules.count)];
     [self.table reloadData]; [self updateRunTitle];
-    AveLog([NSString stringWithFormat:@"[*] выделено %lu", (unsigned long)self.selected.count]);
+    AveLog([NSString stringWithFormat:@"[*] selected count %lu", (unsigned long)self.selected.count]);
 }
 
 // MARK: installers (Sileo / Terminal)
@@ -342,11 +342,11 @@ static void refreshRootPill(void) {
     if (self.running) return;
     self.running = YES; b.enabled = NO;
     NSString *which = (b.tag == 1001) ? @"Sileo" : @"Terminal";
-    AveLog([NSString stringWithFormat:@"\n── Установка: %@", which]);
+    AveLog([NSString stringWithFormat:@"\n : %@", which]);
     AvePost([NSString stringWithFormat:@"INSTALL %@", which]);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *v = (b.tag == 1001) ? InstallSileo() : InstallTerminal();
-        AveLog([NSString stringWithFormat:@"   ↳ %@", v]);
+        AveLog([NSString stringWithFormat:@"    %@", v]);
         AvePost([NSString stringWithFormat:@"INSTALLVERDICT %@ => %@", which, v]);
         refreshRootPill();
         dispatch_async(dispatch_get_main_queue(), ^{ self.running = NO; b.enabled = YES; });
@@ -356,26 +356,26 @@ static void refreshRootPill(void) {
 // MARK: run
 - (void)run {
     if (self.running) return;
-    if (self.selected.count == 0) { AveLog(@"[!] ничего не выбрано"); return; }
+    if (self.selected.count == 0) { AveLog(@"[!] nothing selected"); return; }
     self.running = YES; self.runButton.enabled = NO;
-    [self.runButton setTitle:@"…выполняю" forState:UIControlStateNormal];
-    AveLog([NSString stringWithFormat:@"\n=== ПУСК: %lu модулей ===", (unsigned long)self.selected.count]);
+    [self.runButton setTitle:@"running..." forState:UIControlStateNormal];
+    AveLog([NSString stringWithFormat:@"\n=== RUN: %lu  ===", (unsigned long)self.selected.count]);
     AvePost([NSString stringWithFormat:@"RUN n=%lu", (unsigned long)self.selected.count]);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         [self.selected enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
             NSDictionary *m = self.modules[idx];
-            AveLog([NSString stringWithFormat:@"\n── %@ [%@]", m[@"name"], m[@"status"]]);
-            AveSetStatus(@"выполняю…");
+            AveLog([NSString stringWithFormat:@"\n %@ [%@]", m[@"name"], m[@"status"]]);
+            AveSetStatus(@"working...");
             AvePost([NSString stringWithFormat:@"MOD %@", m[@"name"]]);
             CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
             NSString *v = ((ExploitBlock)m[@"block"])();
             double ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0;
-            AveLog([NSString stringWithFormat:@"   ↳ %@   (%.0f мс)", v ?: @"(нет ответа)", ms]);
+            AveLog([NSString stringWithFormat:@"    %@   (%.0f )", v ?: @"( )", ms]);
             AvePost([NSString stringWithFormat:@"VERDICT %@ => %@", m[@"name"], v ?: @"nil"]);
         }];
         refreshRootPill();
         dispatch_async(dispatch_get_main_queue(), ^{
-            AveLog(@"=== ГОТОВО ===");
+            AveLog(@"=== DONE ===");
             AvePost(@"RUN done");
             self.running = NO; self.runButton.enabled = YES;
             [self updateRunTitle];
