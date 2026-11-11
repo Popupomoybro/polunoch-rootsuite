@@ -32,7 +32,6 @@ extern CFArrayRef IOHIDEventSystemClientCopyServices(IOHIDEventSystemClientRef c
 extern kern_return_t bootstrap_look_up(mach_port_t bootstrap_port,
                                         const char *service_name,
                                         mach_port_t *server_port);
-extern kern_return_t task_get_bootstrap_port(task_t task, mach_port_t *bootstrap_port);
 #import <unistd.h>
 #import <spawn.h>
 #import <sys/wait.h>
@@ -46,6 +45,7 @@ extern CFArrayRef IOHIDEventSystemClientCopyServices(IOHIDEventSystemClientRef c
 #import "Modules.h"
 #import "Root.h"
 #import "Util.h"
+#import "AppDelegate.h"
 
 // Every module is a probe/attempt that measures reality on THIS build and reports.
 // They are ordered from "cheapest and safest" to "heavier": the UI runs them on a
