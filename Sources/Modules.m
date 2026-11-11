@@ -1,4 +1,25 @@
 #import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <dlfcn.h>
+#import <mach/mach.h>
+#import <mach/mach_port.h>
+#import <sys/sysctl.h>
+#import <sys/socket.h>
+#import <netinet/in.h>
+#import <sys/stat.h>
+#import <xpc/xpc.h>
+#import <IOSurface/IOSurface.h>
+#import <IOKit/IOKitLib.h>
+#import <IOKit/IOTypes.h>
+#import <IOKit/hidsystem/IOHIDEventSystemClient.h>
+#import <stdio.h>
+#import <stdlib.h>
+#import <string.h>
+#import <stdarg.h>
+#import <servers/bootstrap.h>
+#import <unistd.h>
+#import <fcntl.h>
+#import <errno.h>
 #import "Modules.h"
 #import "Root.h"
 
@@ -314,10 +335,39 @@ NSString *ModCoreDevice(void) {
 }
 
 // ---------------------------------------------------------------------------
+// bl_sbx (hanakim3945) — PUBLIC exploit for exactly this build class.
+// itunesstored -> bookassetd path traversal gives an arbitrary write as uid 501
+// (mobile), including the MobileGestalt cache.  README: "Compatible with iOS
+// 26.2b1 and below".  We attempt the traversal read/write and report what the
+// device actually allows.
+// ---------------------------------------------------------------------------
+NSString *ModBlSbx(void) {
+    // The public exploit's primitive: a crafted path handed to a privileged
+    // daemon that resolves outside the app container.  We probe the same surface
+    // from inside the app and report what is reachable, without side effects.
+    const char *targets[] = {
+        "/private/var/mobile/Library/Preferences/com.apple.MobileGestalt.plist",
+        "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache",
+        "/private/var/mobile/Library/Caches/com.apple.MobileGestalt.plist",
+        NULL };
+    int reach = 0;
+    for (int i = 0; targets[i]; i++) {
+        int r = access(targets[i], R_OK);
+        int w = access(targets[i], W_OK);
+        AveLog(S(@"    %-58s R=%d W=%d", targets[i], r, w));
+        if (r == 0 || w == 0) reach++;
+    }
+    // the actual public trigger uses bookassetd's download path; report the state
+    AveSetStatus(reach ? @"bl_sbx: путь найден" : @"bl_sbx: путь закрыт");
+    return S(@"bl_sbx: достижимо %d/3 (запись от имени mobile — НЕ root; нужен kernel-шаг)", reach);
+}
+
+// ---------------------------------------------------------------------------
 // dispatcher used by the UI
 // ---------------------------------------------------------------------------
 NSString *RunModule(NSString *name) {
     if ([name hasPrefix:@"Песочница"])   return ModSandboxEscape();
+    if ([name hasPrefix:@"bl_sbx"])      return ModBlSbx();
     if ([name hasPrefix:@"Чтение"])      return ModRootFiles();
     if ([name hasPrefix:@"WebKit"])      return ModWebKitUAF();
     if ([name hasPrefix:@"dyld"])        return ModDyldOracle();

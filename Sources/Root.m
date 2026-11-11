@@ -4,9 +4,11 @@
 #import <fcntl.h>
 #import <errno.h>
 #import <string.h>
+#import <stdlib.h>
 #import <sys/stat.h>
 #import "Root.h"
 #import "Modules.h"
+#import "AppDelegate.h"
 
 static BOOL g_rootObtained = NO;
 

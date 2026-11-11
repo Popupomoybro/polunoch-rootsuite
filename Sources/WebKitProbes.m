@@ -2,7 +2,9 @@
 #import <WebKit/WebKit.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
-#import <os/log.h>
+#import <mach-o/loader.h>
+#import <string.h>
+#import <stdio.h>
 #import "Modules.h"
 
 // ---------------------------------------------------------------------------

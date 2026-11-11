@@ -279,9 +279,9 @@ static void refreshRootPill(void) {
     [self.window makeKeyAndVisible];
 
     self.modules = [NSMutableArray array];
-#define ADD(n, d, s, sel) [self.modules addObject:@{@"name":@n, @"desc":@d, @"status":@s, \
-    @"block": [^{ return RunModule(@n); } copy], @"auto":@(sel)}]
+#define ADD(n, d, s, sel) [self.modules addObject:@{@"name":@n, @"desc":@d, @"status":@s, @"block":[^{ return RunModule(@n); } copy], @"auto":@(sel)}]
     ADD("Песочница: bad_query эскейп", "READ-гранты на /System, /usr/lib — измерено здесь", @"PROVEN", YES);
+    ADD("bl_sbx: itunesstored", "публ. эксплойт: запись от имени mobile (26.2b1 в списке)", @"PUBLIC", YES);
     ADD("Чтение root-файлов", "SystemVersion, Keychains, master.passwd — проверка", @"PROVEN", YES);
     ADD("WebKit DFG UAF", "CVE-2025-43529: addrof + fakeobj (round 112) в своей WebView", @"PROVEN", YES);
     ADD("dyld PAC-оракул", "CVE-2026-20700: dyld пишет разрешённый указатель в наш слот", @"PROVEN", YES);
@@ -344,7 +344,7 @@ static void refreshRootPill(void) {
     NSString *which = (b.tag == 1001) ? @"Sileo" : @"Terminal";
     AveLog([NSString stringWithFormat:@"\n── Установка: %@", which]);
     AvePost([NSString stringWithFormat:@"INSTALL %@", which]);
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATIVE, 0), ^{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *v = (b.tag == 1001) ? InstallSileo() : InstallTerminal();
         AveLog([NSString stringWithFormat:@"   ↳ %@", v]);
         AvePost([NSString stringWithFormat:@"INSTALLVERDICT %@ => %@", which, v]);
@@ -361,7 +361,7 @@ static void refreshRootPill(void) {
     [self.runButton setTitle:@"…выполняю" forState:UIControlStateNormal];
     AveLog([NSString stringWithFormat:@"\n=== ПУСК: %lu модулей ===", (unsigned long)self.selected.count]);
     AvePost([NSString stringWithFormat:@"RUN n=%lu", (unsigned long)self.selected.count]);
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATIVE, 0), ^{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         [self.selected enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
             NSDictionary *m = self.modules[idx];
             AveLog([NSString stringWithFormat:@"\n── %@ [%@]", m[@"name"], m[@"status"]]);
