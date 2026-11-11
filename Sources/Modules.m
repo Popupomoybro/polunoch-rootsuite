@@ -281,7 +281,7 @@ NSString *ModAVE2(void) {
     if (!d) return @"AppleAVE2 service not found";
     io_connect_t c = 0;
     kern_return_t kr = IOServiceOpen(d, mach_task_self(), 0, &c);
-    IOServiceObject(d);
+    IOObjectRelease(d);
     if (kr == KERN_SUCCESS && c) {
         IOServiceClose(c);
         return @"AVE2 user client OPEN  (unexpected)";
@@ -301,30 +301,6 @@ NSString *ModIOHID(void) {
     if (svcs) CFRelease(svcs);
     CFRelease(sys);
     return S(@"IOHID:   %d (user client absent - injection gated by the sandbox)", n);
-}
-
-// ---------------------------------------------------------------------------
-// 8. GPU / WebGL fingerprint (proves ANGLE is not in play on this build)
-// ---------------------------------------------------------------------------
-NSString *ModGPU(void) {
-    // Offscreen GL via EAGL is heavy; the cheap equivalent is to ask the WebKit
-    // layer through a WKWebView, created lazily and released right after.
-    WKWebView *wv = [[WKWebView alloc] initWithFrame:CGRectZero];
-    [wv loadHTMLString:@"<html><body></body></html>" baseURL:nil];
-    dispatch_semaphore_t s = dispatch_semaphore_create(0);
-    __block NSString *ver = nil, *rend = nil;
-    [wv evaluateJavaScript:@"var c=document.createElement('canvas');" completionHandler:nil];
-    [wv evaluateJavaScript:@"(function(){var c=document.createElement('canvas');var g=c.getContext('webgl2');"
-        @"if(!g)return 'no-webgl2';var d=g.getExtension('WEBGL_debug_renderer_info');"
-        @"var r=d?g.getParameter(d.UNMASKED_RENDERER_WEBGL):g.getParameter(g.RENDERER);"
-        @"return g.getParameter(g.VERSION)+' | '+r;})()" completionHandler:^(id v, NSError *e) {
-        ver = [v isKindOfClass:[NSString class]] ? v : ([v respondsToSelector:@selector(description)] ? [v description] : @"?");
-        rend = e ? e.localizedDescription : @"";
-        dispatch_semaphore_signal(s);
-    }];
-    dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
-    [wv stopLoading]; wv = nil;
-    return S(@"WebGL: %@ %@", ver ?: @"no answer", rend ?: @"");
 }
 
 // ---------------------------------------------------------------------------
