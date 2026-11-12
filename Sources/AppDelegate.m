@@ -322,7 +322,12 @@ static void refreshRootPill(void) {
     [self.modules addObject:@{@"name":@"GPU process carrier", @"desc":@"offscreen GL surface as the GPU-process entry", @"status":@"GPU", @"block":[^{ return RunRootPath(@"GPU process carrier") ?: RunModule(@"GPU process carrier"); } copy], @"auto":@(NO)}];
 
 
-    self.selected = [NSMutableIndexSet indexSet];   // nothing preselected
+    // the modules marked @"auto":@(YES) are selected at startup; everything else
+    // stays unselected until the user taps it.
+    self.selected = [NSMutableIndexSet indexSet];
+    for (NSUInteger i = 0; i < self.modules.count; i++) {
+        if ([self.modules[i][@"auto"] boolValue]) [self.selected addIndex:i];
+    }
 
     AvePost([NSString stringWithFormat:@"launched modules=%lu", (unsigned long)self.modules.count]);
     AveLog(@"[*] RootSuite ready: tap a module to select it, then Run.");
