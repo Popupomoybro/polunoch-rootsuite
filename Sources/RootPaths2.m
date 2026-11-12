@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <WebKit/WebKit.h>
 #import <IOKit/IOKitLib.h>
+#import <JavaScriptCore/JavaScriptCore.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
@@ -109,6 +110,23 @@ static const char *kFakeRW = R"JS(
   return JSON.stringify(out);
 })()
 )JS";
+
+static NSString *RunJS(const char *js, int timeoutSec) {
+    @autoreleasepool {
+        JSContext *ctx = [[JSContext alloc] init];
+        dispatch_semaphore_t s = dispatch_semaphore_create(0);
+        __block NSString *res = @"(no answer)";
+        [ctx evaluateScript:[NSString stringWithUTF8String:js]
+        completionHandler:^(JSValue *v, JSValue *err) {
+            res = [v isKindOfClass:[NSString class]] ? v : [[v description] ?: @"?" copy];
+            if (err && ![err isUndefined]) res = [err toString] ?: @"js error";
+            dispatch_semaphore_signal(s);
+        }];
+        dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, timeoutSec * NSEC_PER_SEC));
+        ctx = nil;
+        return res;
+    }
+}
 
 NSString *ModJscFakeRW(void) {
     AveLog(@"    JSC fake-object R/W (structure ID -> in-object slots -> TypedArray length)");
