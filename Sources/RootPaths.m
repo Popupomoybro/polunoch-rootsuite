@@ -230,12 +230,5 @@ NSString *ModContainerPivot(void) {
 // ===========================================================================
 // dispatcher
 // ===========================================================================
-NSString *RunRootPath(NSString *name) {
-    if ([name hasPrefix:@"task_for_pid"])       return ModTaskForPid();
-    if ([name hasPrefix:@"mach_vm"])            return ModTaskVmRW();
-    if ([name hasPrefix:@"setuid"])             return ModSetuidScan();
-    if ([name hasPrefix:@"IOKit reachable"])    return ModIOKitReachable();
-    if ([name hasPrefix:@"daemon surface"])     return ModMachLookupSweep();
-    if ([name hasPrefix:@"daemon pivot"])       return ModContainerPivot();
-    return nil;
-}
+// The extended dispatcher lives in LastMile.m (it covers every module);
+// this file only implements the modules.
