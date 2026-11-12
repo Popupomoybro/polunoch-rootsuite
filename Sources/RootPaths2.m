@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#import <WebKit/WebKit.h>
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <mach/mach.h>

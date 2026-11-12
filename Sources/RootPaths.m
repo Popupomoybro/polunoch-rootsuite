@@ -158,7 +158,7 @@ NSString *ModTaskVmRW(void) {
 // Group B: daemon pivot surface (what an app can actually talk to)
 // ===========================================================================
 NSString *ModMachLookupSweep(void) {
-    struct { const char *name; const char *why; } S[] = {
+    struct { const char *name; const char *why; } SVC[] = {
         {"com.apple.CoreAuthentication.daemon", "auth decisions"},
         {"com.apple.DeviceAccess.xpc", "device access"},
         {"com.apple.FileProvider", "file provider"},
@@ -183,16 +183,16 @@ NSString *ModMachLookupSweep(void) {
     mach_port_t bp;
     task_get_bootstrap_port(mach_task_self(), &bp);
     int open_ = 0;
-    for (unsigned i = 0; i < sizeof(S)/sizeof(S[0]); i++) {
+    for (unsigned i = 0; i < sizeof(SVC)/sizeof(SVC[0]); i++) {
         mach_port_t sp = MACH_PORT_NULL;
-        if (bootstrap_look_up(bp, (char *)S[i].name, &sp) == KERN_SUCCESS && sp != MACH_PORT_NULL) {
+        if (bootstrap_look_up(bp, (char *)SVC[i].name, &sp) == KERN_SUCCESS && sp != MACH_PORT_NULL) {
             open_++;
-            AveLog(S(@"    OPEN  %-42s %s", S[i].name, S[i].why));
+            AveLog(S(@"    OPEN  %-42s %s", SVC[i].name, SVC[i].why));
             mach_port_deallocate(mach_task_self(), sp);
         }
     }
     return S(@"daemon surface: %d/%d services answering  each is a pivot candidate",
-             open_, (int)(sizeof(S)/sizeof(S[0])));
+             open_, (int)(sizeof(SVC)/sizeof(SVC[0])));
 }
 
 // ===========================================================================
