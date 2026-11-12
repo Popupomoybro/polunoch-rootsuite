@@ -113,6 +113,8 @@ static const char *kFakeRW = R"JS(
 
 static NSString *RunJS(const char *js, int timeoutSec) {
     @autoreleasepool {
+        JSContext *ctx = [[JSContext alloc] init];
+        NSString *res = @"(no answer)";
         @try {
             JSValue *v = [ctx evaluateScript:[NSString stringWithUTF8String:js]];
             if ([ctx exception]) res = [[ctx exception] toString] ?: @"js exception";
