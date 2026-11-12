@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <WebKit/WebKit.h>
+#import <IOKit/IOKitLib.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <mach/mach.h>
