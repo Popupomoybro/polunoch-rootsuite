@@ -3,6 +3,8 @@
 #import <dlfcn.h>
 #import <mach/mach.h>
 #import <mach/mach_port.h>
+#import <CoreFoundation/CoreFoundation.h>
+#import <IOKit/IOKitLib.h>
 #import "Modules.h"
 #import "Root.h"
 #import "Util.h"
