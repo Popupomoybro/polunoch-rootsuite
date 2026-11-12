@@ -62,6 +62,8 @@ NSString *ModAppleKeyStore(void);
 NSString *ModIOTimeSyncReach(void);
 NSString *RunKernelPath(NSString *name);
 
+NSString *ModJscScribbleRW(void);
+
 // dispatchers
 NSString *RunModule(NSString *name);
 NSString *RunRootPath(NSString *name);

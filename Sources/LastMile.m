@@ -197,6 +197,7 @@ NSString *RunRootPath(NSString *name) {
     if ([name hasPrefix:@"cfprefsd"])                return ModCfprefsdPivot();
     if ([name hasPrefix:@"MobileGestalt"])           return ModGestaltPoison();
     if ([name hasPrefix:@"writetosymlinked"])        return ModWriteToSymlinked();
+    if ([name hasPrefix:@"JSC scribble"])            return ModJscScribbleRW();
     if ([name hasPrefix:@"task_for_pid"])            return ModTaskForPid();
     if ([name hasPrefix:@"mach_vm"])                 return ModTaskVmRW();
     if ([name hasPrefix:@"setuid"])                  return ModSetuidScan();
