@@ -39,6 +39,21 @@ NSString *ModND6(void);
 NSString *ModHFS(void);
 NSString *ModCoreDevice(void);
 
+// ---- the last mile (unpatched app->root bugs on this build) ----------------
+NSString *ModCoreServices20615(void);
+NSString *ModCoreServices20617(void);
+NSString *ModKernelRoot(void);
+NSString *ModLibxpc20667(void);
+NSString *ModCfprefsdPivot(void);
+NSString *ModGestaltPoison(void);
+NSString *ModWriteToSymlinked(void);
+
+// ---- cross-file implementations (RootPaths.m / RootPaths2.m) ---------------
+NSString *ModDaemonPivotWrite(void);
+NSString *ModJscFakeRW(void);
+NSString *ModIosurfaceRootSelectors(void);
+NSString *ModGpuCarrier(void);
+
 // dispatchers
 NSString *RunModule(NSString *name);
 NSString *RunRootPath(NSString *name);
