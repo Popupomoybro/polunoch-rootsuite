@@ -236,16 +236,4 @@ NSString *ModDaemonPivotWrite(void) {
 // ---------------------------------------------------------------------------
 // dispatcher for the extended catalogue
 // ---------------------------------------------------------------------------
-NSString *RunRootPath(NSString *name) {
-    if ([name hasPrefix:@"task_for_pid"])            return ModTaskForPid();
-    if ([name hasPrefix:@"mach_vm"])                 return ModTaskVmRW();
-    if ([name hasPrefix:@"setuid"])                  return ModSetuidScan();
-    if ([name hasPrefix:@"IOKit reachable"])         return ModIOKitReachable();
-    if ([name hasPrefix:@"daemon surface"])          return ModMachLookupSweep();
-    if ([name hasPrefix:@"daemon pivot: writable"])  return ModContainerPivot();
-    if ([name hasPrefix:@"daemon pivot: container"]) return ModDaemonPivotWrite();
-    if ([name hasPrefix:@"JSC fake-object"])         return ModJscFakeRW();
-    if ([name hasPrefix:@"IOSurfaceRoot selectors"]) return ModIosurfaceRootSelectors();
-    if ([name hasPrefix:@"GPU process carrier"])     return ModGpuCarrier();
-    return nil;
-}
+// dispatcher lives in LastMile.m (it covers every module)
