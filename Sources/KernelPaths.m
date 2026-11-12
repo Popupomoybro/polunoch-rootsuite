@@ -14,6 +14,18 @@
 // thread races; a single zeroed call to a file-backed driver returns an error
 // code instead.  A wider sweep is opt-in via POC_FULL=1.
 // ---------------------------------------------------------------------------
+#import <Foundation/Foundation.h>
+#import <CoreFoundation/CoreFoundation.h>
+#import <UIKit/UIKit.h>
+#import <dlfcn.h>
+#import <mach/mach.h>
+#import <mach/mach_port.h>
+#import <IOKit/IOKitLib.h>
+#import "Modules.h"
+#import "Root.h"
+#import "Util.h"
+#import "AppDelegate.h"
+
 static int sweepClient(const char *cls, int maxSel) {
     CFMutableDictionaryRef m = IOServiceMatching(cls);
     if (!m) return -1;
