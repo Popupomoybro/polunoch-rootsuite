@@ -7,25 +7,41 @@
 extern "C" {
 #endif
 
-// ---- every exploit / root path we have, as a runnable module ---------------
-NSString *ModWorseQuery(void);            // forcequitOS worse_query  PUBLIC/UNPATCHED
-NSString *ModBlSbx(void);                 // hanakim3945 bl_sbx       PUBLIC (26.2b1)
-NSString *ModSandboxEscape(void);        // bad_query container escape PROVEN
-NSString *ModRootFiles(void);            // read root-owned files      PROVEN
-NSString *ModWebKitUAF(void);            // CVE-2025-43529 addrof/fake PROVEN
-NSString *ModDyldOracle(void);           // CVE-2026-20700 PAC oracle  PROVEN
-NSString *ModIOHID(void);                // float->int sites           MEASURED
-NSString *ModIOSurface(void);            // format-class consistency  MEASURED
-NSString *ModAVE2(void);                  // AppleAVE2 user client     GATED
-NSString *ModKernelPosture(void);        // bootargs/AMFI/CSR/tfp0     MEASURED
-NSString *ModPrivilegedServices(void);   // Mach services an app can open TEST
-NSString *ModGPU(void);                   // WebKit WebGL fingerprint  MEASURED
-NSString *ModIOSkywalk(void);            // varint off-by-one (LAN)    TEST
-NSString *ModND6(void);                   // ND6 options (LAN)         TEST
-NSString *ModHFS(void);                   // flag-nibble diff evidence DIFF
+// ---- container / sandbox --------------------------------------------------
+NSString *ModWorseQuery(void);      // PUBLIC worse_query container escape
+NSString *ModBlSbx(void);           // PUBLIC bl_sbx (write as uid 501)
+NSString *ModSandboxEscape(void);  // PROVEN bad_query escape
+NSString *ModRootFiles(void);       // PROVEN root-owned file reads
 
-// dispatcher from the UI's module name
+// ---- kernel / credential surface (each is a step to uid 0) ----------------
+NSString *ModTaskForPid(void);      // task port of root processes -> their R/W
+NSString *ModTaskVmRW(void);        // mach_vm R/W primitives
+NSString *ModSetuidScan(void);      // setuid-root binaries reachable
+NSString *ModIOKitReachable(void);  // IOKit user clients the app can open
+
+// ---- daemon pivot surface -------------------------------------------------
+NSString *ModMachLookupSweep(void); // privileged Mach services answering
+NSString *ModContainerPivot(void);  // writable daemon paths
+
+// ---- JSC / WebKit chain ---------------------------------------------------
+NSString *ModWebKitUAF(void);       // PROVEN addrof + fakeobj
+NSString *ModJscStructScan(void);    // structure ID -> in-object R/W
+NSString *ModDyldOracle(void);      // PROVEN dyld PAC signing oracle
+
+// ---- measured / kernel-diff findings --------------------------------------
+NSString *ModKernelPosture(void);
+NSString *ModIOHID(void);
+NSString *ModIOSurface(void);
+NSString *ModAVE2(void);
+NSString *ModGPU(void);
+NSString *ModIOSkywalk(void);
+NSString *ModND6(void);
+NSString *ModHFS(void);
+NSString *ModCoreDevice(void);
+
+// dispatchers
 NSString *RunModule(NSString *name);
+NSString *RunRootPath(NSString *name);
 
 #ifdef __cplusplus
 }

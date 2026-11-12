@@ -279,22 +279,32 @@ static void refreshRootPill(void) {
     [self.window makeKeyAndVisible];
 
     self.modules = [NSMutableArray array];
-#define ADD(n, d, s, sel) [self.modules addObject:@{@"name":@(n), @"desc":@(d), @"status":s, @"block":[^{ return RunModule(@(n)); } copy], @"auto":@(sel)}]
-    ADD("worse_query container escape", "PUBLIC/UNPATCHED: R/W in every app container (26.0-26.7.2)", @"PUBLIC", NO);
-    ADD("Sandbox: bad_query escape", "READ grants on /System and /usr/lib - live probe", @"PROVEN", NO);
-    ADD("bl_sbx: itunesstored", "PUBLIC exploit: write as uid 501, listed for 26.2b1", @"PUBLIC", NO);
-    ADD("Root-owned file read", "SystemVersion, Keychains, master.passwd - proof of access", @"PROVEN", NO);
-    ADD("WebKit DFG UAF", "CVE-2025-43529: addrof + fakeobj, in-app WebView", @"PROVEN", NO);
-    ADD("dyld PAC oracle", "CVE-2026-20700: dyld writes a resolved pointer into our slot", @"PROVEN", NO);
-    ADD("Kernel posture", "bootargs, AMFI, CSR, tfp0, unrestrictfs - what is open", @"MEASURED", NO);
-    ADD("Privileged Mach services", "host special ports and user clients - what opens", @"TEST", NO);
-    ADD("IOHID float->int", "73 conversion sites, 51 round-up - user client gated", @"MEASURED", NO);
-    ADD("IOSurface format-class", "7 formats, locked=7 / mismatch=0", @"MEASURED", NO);
-    ADD("AVE2 user client", "IOServiceOpen 0xe00002e2 - gated by the sandbox", @"GATED", NO);
-    ADD("GPU / WebGL", "WebKit WebGL (not ANGLE), PBO validation correct", @"MEASURED", NO);
-    ADD("IOSkywalk varint", "off-by-one in the parser (needs a LAN frame)", @"TEST", NO);
-    ADD("XNU ND6 options", "4 missing checks (LAN path)", @"TEST", NO);
-    ADD("HFS flag-nibble", "5/5 on 26.2b1 vs 0/5 on 26.6 (kernel diff)", @"DIFF", NO);
+#define ADD(n, d, s, sel) [self.modules addObject:@{@"name":@(n), @"desc":@(d), @"status":@s, @"block":[^{ return RunRootPath(@(n)) ?: RunModule(@(n)); } copy], @"auto":@(sel)}]
+    ADD("worse_query container escape", "PUBLIC, unpatched on 26.0-26.7.2: read/write every app container", @"PUBLIC", NO);
+    ADD("bl_sbx: itunesstored", "PUBLIC: arbitrary write as uid 501, MobileGestalt cache", @"PUBLIC", NO);
+    ADD("Sandbox: bad_query escape", "PROVEN: READ grants on /System and /usr/lib", @"PROVEN", NO);
+    ADD("Root-owned file read", "PROVEN: SystemVersion, Keychains, master.passwd", @"PROVEN", NO);
+    ADD("task_for_pid root sweep", "task port of a root pid -> its memory, its code, its identity", @"KERNEL", NO);
+    ADD("mach_vm R/W primitives", "the read/write step a task port unlocks", @"KERNEL", NO);
+    ADD("setuid-root binary scan", "setuid helpers reachable through the escape", @"KERNEL", NO);
+    ADD("IOKit reachable classes", "user clients an app can open = kernel attack surface", @"KERNEL", NO);
+    ADD("daemon surface: Mach services", "privileged daemons answering from the container", @"PIVOT", NO);
+    ADD("daemon pivot: writable paths", "paths a root daemon reads that we can write", @"PIVOT", NO);
+    ADD("daemon pivot: container write", "our writes landing in other containers", @"PIVOT", NO);
+    ADD("WebKit DFG UAF", "PROVEN: addrof + fakeobj (CVE-2025-43529)", @"PROVEN", NO);
+    ADD("JSC structure-ID scan", "the missing piece: in-object R/W without PAC", @"JSC", NO);
+    ADD("JSC fake-object R/W", "arbitrary read/write through a real structure ID", @"JSC", NO);
+    ADD("dyld PAC oracle", "PROVEN: dyld writes a resolved pointer into our slot", @"PROVEN", NO);
+    ADD("Kernel posture", "bootargs, AMFI, CSR, tfp0, unrestrictfs", @"LIVE", NO);
+    ADD("IOHID float->int sites", "73 conversion sites - user client gated today", @"KERNEL", NO);
+    ADD("IOSurface format-class", "format consistency, locked=7 / mismatch=0", @"KERNEL", NO);
+    ADD("AVE2 user client", "IOServiceOpen 0xe00002e2 - gated by the sandbox", @"KERNEL", NO);
+    ADD("IOSurfaceRoot selectors", "externalMethod sweep on a reachable root client", @"KERNEL", NO);
+    ADD("GPU / WebGL", "WebKit WebGL, PBO validation correct (ANGLE absent)", @"GPU", NO);
+    ADD("IOSkywalk varint (LAN)", "off-by-one in the parser - needs a LAN frame", @"LAN", NO);
+    ADD("XNU ND6 options (LAN)", "4 missing checks - needs a LAN frame", @"LAN", NO);
+    ADD("HFS flag-nibble", "5/5 on 26.2b1 vs 0/5 on 26.6", @"KERNEL", NO);
+    ADD("GPU process carrier", "offscreen GL surface as the GPU-process entry", @"GPU", NO);
 #undef ADD
 
     self.selected = [NSMutableIndexSet indexSet];   // nothing preselected
