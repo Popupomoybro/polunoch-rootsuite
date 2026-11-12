@@ -138,7 +138,7 @@ NSString *ModUnifiedPrimitives(void) {
     uint64_t wt = 0, dlsymAddr = 0;
     if ([[NSFileManager defaultManager] fileExistsAtPath:mal]) {
         dlopen(ex.UTF8String, RTLD_NOW | RTLD_GLOBAL);
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATIVE, 0), ^{
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             void *h_cl = dlopen(cl.UTF8String, RTLD_NOW);
             (void)h_cl;
         });
