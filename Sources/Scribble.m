@@ -113,17 +113,19 @@ static const char *kScribble = R"JS(
 
 // Run JS in a JSContext (JavaScriptCore, no WebKit2).  Returns the string result.
 static NSString *RunJS(const char *js, int timeoutSec) {
+    (void)timeoutSec;
     @autoreleasepool {
         JSContext *ctx = [[JSContext alloc] init];
-        __block NSString *res = @"(no answer)";
-        dispatch_semaphore_t s = dispatch_semaphore_create(0);
-        [ctx evaluateScript:[NSString stringWithUTF8String:js]
-        completionHandler:^(JSValue *v, JSValue *err) {
-            res = [v isKindOfClass:[NSString class]] ? v : [[v description] ?: @"?" copy];
-            if (err && ![err isUndefined]) res = [err toString] ?: @"js error";
-            dispatch_semaphore_signal(s);
-        }];
-        dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, timeoutSec * NSEC_PER_SEC));
+        NSString *res = @"(no answer)";
+        @try {
+            JSValue *v = [ctx evaluateScript:[NSString stringWithUTF8String:js]];
+            if ([ctx exception]) res = [[ctx exception] toString] ?: @"js exception";
+            else res = [v isKindOfClass:[NSString class]] ? v
+                    : ([v respondsToSelector:@selector(description)] ? [v description] : @"?");
+        } @catch (NSException *e) {
+            res = [NSString stringWithFormat:@"exception %@", e.reason];
+        }
+        ctx = nil;
         return res;
     }
 }

@@ -115,16 +115,16 @@ NSString *ModUnifiedPrimitives(void) {
 
     // 1. JSC chain in this process's own JavaScriptCore
     JSContext *ctx = [[JSContext alloc] init];
-    __block NSString *res = @"(no answer)";
-    dispatch_semaphore_t s = dispatch_semaphore_create(0);
+    NSString *res = @"(no answer)";
     [ctx evaluateScript:@"1+1"];
-    [ctx evaluateScript:[NSString stringWithUTF8String:kUnifiedJS]
-    completionHandler:^(JSValue *v, JSValue *err) {
-        res = [v isKindOfClass:[NSString class]] ? v : [[v toArray] description];
-        if (err && ![err isUndefined]) res = [err toString] ?: @"js error";
-        dispatch_semaphore_signal(s);
-    }];
-    dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, 240 * NSEC_PER_SEC));
+    @try {
+        JSValue *v = [ctx evaluateScript:[NSString stringWithUTF8String:kUnifiedJS]];
+        if ([ctx exception]) res = [[ctx exception] toString] ?: @"js exception";
+        else res = [v isKindOfClass:[NSString class]] ? v
+                : ([v respondsToSelector:@selector(description)] ? [v description] : @"?");
+    } @catch (NSException *e) {
+        res = [NSString stringWithFormat:@"exception %@", e.reason];
+    }
     AveLog([NSString stringWithFormat:@"    JSC chain: %@", res]);
     BOOL jscReady = [res containsString:@"\"ready\":true"];
     AvePost([NSString stringWithFormat:@"JSC %@", res]);

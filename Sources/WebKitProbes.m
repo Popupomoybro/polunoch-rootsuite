@@ -121,16 +121,14 @@ static const char *kStructScan = R"JS(
 // build inside a sideloaded app.
 static NSString *RunJS(const char *js, int timeoutSec) {
     @autoreleasepool {
-        JSContext *ctx = [[JSContext alloc] init];
-        dispatch_semaphore_t s = dispatch_semaphore_create(0);
-        __block NSString *res = @"(no answer)";
-        [ctx evaluateScript:[NSString stringWithUTF8String:js]
-        completionHandler:^(JSValue *v, JSValue *err) {
-            res = [v isKindOfClass:[NSString class]] ? v : [[v description] ?: @"?" copy];
-            if (err && ![err isUndefined]) res = [err toString] ?: @"js error";
-            dispatch_semaphore_signal(s);
-        }];
-        dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, timeoutSec * NSEC_PER_SEC));
+        @try {
+            JSValue *v = [ctx evaluateScript:[NSString stringWithUTF8String:js]];
+            if ([ctx exception]) res = [[ctx exception] toString] ?: @"js exception";
+            else res = [v isKindOfClass:[NSString class]] ? v
+                    : ([v respondsToSelector:@selector(description)] ? [v description] : @"?");
+        } @catch (NSException *e) {
+            res = [NSString stringWithFormat:@"exception %@", e.reason];
+        }
         ctx = nil;
         return res;
     }
