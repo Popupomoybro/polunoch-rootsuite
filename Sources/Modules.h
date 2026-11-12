@@ -54,6 +54,14 @@ NSString *ModJscFakeRW(void);
 NSString *ModIosurfaceRootSelectors(void);
 NSString *ModGpuCarrier(void);
 
+
+// ---- top public kernel attack surfaces (measured, never fired) -----------
+NSString *ModAppleJPEGDriver(void);
+NSString *ModAppleM2ScalerCSC(void);
+NSString *ModAppleKeyStore(void);
+NSString *ModIOTimeSyncReach(void);
+NSString *RunKernelPath(NSString *name);
+
 // dispatchers
 NSString *RunModule(NSString *name);
 NSString *RunRootPath(NSString *name);
