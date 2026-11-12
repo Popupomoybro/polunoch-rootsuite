@@ -30,11 +30,10 @@ static int sweepClient(const char *cls, int maxSel) {
     CFMutableDictionaryRef m = IOServiceMatching(cls);
     if (!m) return -1;
     io_service_t d = IOServiceGetMatchingService(kIOMainPortDefault, m);
-    if (!d) { CFRelease(m); return -2; }
+    if (!d) { return -2; }   /* matching dict is consumed by the call */
     io_connect_t c = 0;
     kern_return_t kr = IOServiceOpen(d, mach_task_self(), 0, &c);
     IOObjectRelease(d);
-    CFRelease(m);
     if (kr != KERN_SUCCESS || !c) return (int)kr;
 
     int answered = 0;
@@ -120,10 +119,9 @@ static int openUserClient(const char *cls, int type, io_connect_t *out) {
     CFMutableDictionaryRef m = IOServiceMatching(cls);
     if (!m) return -1;
     io_service_t d = IOServiceGetMatchingService(kIOMainPortDefault, m);
-    if (!d) { CFRelease(m); return -2; }
+    if (!d) { return -2; }   /* matching dict is consumed by the call */
     kern_return_t kr = IOServiceOpen(d, mach_task_self(), type, out);
     IOObjectRelease(d);
-    CFRelease(m);
     return kr == KERN_SUCCESS ? 0 : kr;
 }
 
@@ -162,15 +160,13 @@ NSString *ModAppleKeyStore(void) {
 
 NSString *ModIOTimeSyncReach(void) {
     CFMutableDictionaryRef m = IOServiceMatching("IOTimeSyncClockManager");
-    io_service_t d = m ? IOServiceGetMatchingService(kIOMainPortDefault, m) : 0;
+    io_service_t d = m ? IOServiceGetMatchingService(kIOMainPortDefault, m) : 0;   /* consumes m */
     if (!d) {
-        if (m) CFRelease(m);
         m = IOServiceMatching("IOTimeSyncFamily");
-        d = m ? IOServiceGetMatchingService(kIOMainPortDefault, m) : 0;
+        d = m ? IOServiceGetMatchingService(kIOMainPortDefault, m) : 0;            /* consumes m */
     }
     BOOL present = (d != 0);
     if (d) IOObjectRelease(d);
-    if (m) CFRelease(m);
     if (!present)
         return @"IOTimeSyncFamily: service not found (the public panic PoC needs it)";
     // deliberately NOT opened: the race is a 100% reproducible kernel panic.
