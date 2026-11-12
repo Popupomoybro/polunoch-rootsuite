@@ -127,7 +127,6 @@ NSString *ModUnifiedPrimitives(void) {
         }
     }
 
-    ctx = nil;
     if (jscReady && oracleOk) {
         AveSetStatus(@"BOTH PRIMITIVES IN ONE PROCESS");
         return S(@"unified: JSC R/W + dyld PAC oracle live in one process "
