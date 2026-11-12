@@ -137,6 +137,5 @@ NSString *ModJscScribbleRW(void) {
         AveSetStatus(@"arbitrary R/W ACTIVE in our own process, no PAC needed");
         return @"ARBITRARY R/W ACTIVE on 23C5027f: read64/write64 self-tested";
     }
-    if ([r containsString:@"\"groomFailed\"") return r;
     return r;
 }
