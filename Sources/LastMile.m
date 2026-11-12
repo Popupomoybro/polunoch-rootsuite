@@ -16,6 +16,11 @@
 #import "Util.h"
 #import "AppDelegate.h"
 
+// bootstrap_look_up lives in a header the plain iOS SDK lacks.
+extern kern_return_t bootstrap_look_up(mach_port_t bootstrap_port,
+                                        const char *service_name,
+                                        mach_port_t *server_port);
+
 // ===========================================================================
 // The last mile: Apple-confirmed "an app may be able to gain root privileges"
 // bugs that are UNPATCHED on 26.2 beta 1 (fixed only in 26.3, 11 Feb 2026).
