@@ -304,6 +304,37 @@ static void refreshRootPill(void) {
     AveLog(@"[*] Sileo / Term    root.");
     refreshRootPill();
     [self updateRunTitle];
+
+    // ---- autonomous mode: AUTO=<module name> runs that module at startup -----
+    // Lets the host drive the app without touching the phone:
+    //   pymobiledevice3 developer dvt launch <bid> --env AUTO=worse_query
+    const char *autoEnv = getenv("AUTO");
+    if (autoEnv && *autoEnv) {
+        NSString *want = [NSString stringWithUTF8String:autoEnv];
+        AveLog([NSString stringWithFormat:@"[*] AUTO mode: %@", want]);
+        AvePost([NSString stringWithFormat:@"AUTO %@", want]);
+        if ([want isEqualToString:@"ROOT"]) {
+            BOOL have = RootProbe();
+            AveLog(have ? @"[***] ROOT IS PRESENT: uid=0 confirmed" : @"[-] no root: uid!=0 everywhere");
+            AvePost([NSString stringWithFormat:@"AUTOROOT %@", have ? @"YES" : @"NO"]);
+            return YES;
+        }
+        for (NSUInteger i = 0; i < self.modules.count; i++) {
+            NSString *nm = self.modules[i][@"name"];
+            if ([nm rangeOfString:want].location != NSNotFound) {
+                [self.selected addIndex:i];
+                AveLog([NSString stringWithFormat:@"[*] auto-selected %@", nm]);
+                break;
+            }
+        }
+        if (self.selected.count) {
+            [self.table reloadData];
+            [self updateRunTitle];
+            [self run];
+        } else {
+            AveLog(@"[!] AUTO: module not found");
+        }
+    }
     return YES;
 }
 
