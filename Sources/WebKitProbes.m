@@ -235,7 +235,7 @@ NSString *ModDyldOracle(void) {
     if (!h_ex) return S(@"libexports did not load: %s", dlerror());
     AveLog(@"    libexports loaded");
 
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATIVE, 0), ^{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         void *h_cl = dlopen(cl.UTF8String, RTLD_NOW);
         AveLog(h_cl ? @"    libclient loaded (page-in gate open)" : @"    libclient did not load");
     });

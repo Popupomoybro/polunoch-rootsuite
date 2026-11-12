@@ -3,6 +3,10 @@
 #import <dlfcn.h>
 #import <mach/mach.h>
 #import <mach/mach_port.h>
+#import <mach/mach_vm.h>
+#import <IOKit/IOKitLib.h>
+#import <sys/proc_info.h>
+#import <sys/param.h>
 #import <sys/sysctl.h>
 #import <sys/socket.h>
 #import <netinet/in.h>
