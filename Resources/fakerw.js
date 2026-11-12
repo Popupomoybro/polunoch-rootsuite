@@ -13,6 +13,7 @@
       try { m = String(e); } catch (e2) { m = 'unstringifiable'; }
       out.guard.push(name + ': ' + m);
       out.step = (out.step || []).concat([name + ':FAILED']);
+      aveStep('PHASE ' + name + ' FAILED: ' + m);
       return false;
     }
   }
@@ -104,5 +105,7 @@
     var fake2 = fakeobj(fakeAddr);
     out.rawRead = ftoi(fake2.qz9) === 0xc0ffeec0ffee0001n;
   });
-  return JSON.stringify(out);
+  var answer = JSON.stringify(out);
+  aveStep('RESULT ' + answer);
+  return answer;
 })()

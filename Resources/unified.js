@@ -8,6 +8,7 @@
       try { m = String(e); } catch (e2) { m = 'unstringifiable'; }
       out.guard.push(name + ': ' + m);
       out.step.push(name + ':FAILED');
+      aveStep('PHASE ' + name + ' FAILED: ' + m);
       return false;
     }
   }
@@ -121,5 +122,7 @@
   });
 
   aveStep('phases: ' + out.step.join(' | '));
-  return JSON.stringify(out);
+  var answer = JSON.stringify(out);
+  aveStep('RESULT ' + answer);
+  return answer;
 })()

