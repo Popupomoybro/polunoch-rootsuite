@@ -126,13 +126,22 @@ static NSString *RunJS(const char *js, int timeoutSec) {
         NSString *res = @"(no answer)";
         @try {
             JSValue *v = [ctx evaluateScript:[NSString stringWithUTF8String:js]];
-            if ([ctx exception]) res = [[ctx exception] toString] ?: @"js exception";
-            else res = [v isKindOfClass:[NSString class]] ? v
-                    : ([v respondsToSelector:@selector(description)] ? [v description] : @"?");
+            JSValue *exc = [ctx exception];
+            if (exc) {
+                id o = [exc toObject];          // sanctioned bridge, no JS re-entry
+                res = [o isKindOfClass:[NSString class]] ? o : [o description];
+            } else if (v) {
+                if ([v isKindOfClass:[NSString class]]) res = v;
+                else {
+                    id o = [v toObject];
+                    res = [o isKindOfClass:[NSString class]] ? o : [o description];
+                }
+            }
         } @catch (NSException *e) {
             res = [NSString stringWithFormat:@"exception %@", e.reason];
         }
         ctx = nil;
+        if (![res isKindOfClass:[NSString class]]) res = @"(no answer)";
         return res;
     }
 }

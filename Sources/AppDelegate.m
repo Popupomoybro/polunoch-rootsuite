@@ -452,7 +452,14 @@ static void refreshRootPill(void) {
             AveSetStatus(@"working...");
             AvePost([NSString stringWithFormat:@"MOD %@", m[@"name"]]);
             CFAbsoluteTime t0 = CFAbsoluteTimeGetCurrent();
-            NSString *v = ((ExploitBlock)m[@"block"])();
+            NSString *v = nil;
+            @try {
+                v = ((ExploitBlock)m[@"block"])();
+            } @catch (NSException *e) {
+                // one module must never take the whole run down
+                v = [NSString stringWithFormat:@"[module threw] %@", e.reason];
+                AveLog([NSString stringWithFormat:@"    !! %@", v]);
+            }
             double ms = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0;
             AveLog([NSString stringWithFormat:@"    %@   (%.0f )", v ?: @"( )", ms]);
             AvePost([NSString stringWithFormat:@"VERDICT %@ => %@", m[@"name"], v ?: @"nil"]);
