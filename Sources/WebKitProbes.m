@@ -135,8 +135,6 @@ static NSString *RunJS(const char *js, int timeoutSec) {
         return res;
     }
 }
-    return res;
-}
 
 NSString *ModJscStructScan(void) {
     AveLog(@"    JSC structure-ID scan (name-keyed, safe within the valid range)");
