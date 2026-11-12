@@ -92,7 +92,7 @@ static const char *kUnifiedJS = R"JS(
   out.exp.rounds = rounds;
   out.exp.huntMs = Date.now() - t0;
   aveStep('hunt finished: rounds=' + rounds + ' in ' + out.exp.huntMs +
-          'ms, trigger=' + (W ? 'FIRED@round ' + W.round : 'no'));
+          'ms, trigger=' + (W ? 'FIRED at round ' + W.round : 'no'));
 
   function addrof(o) { W.boxed[0] = o; return ftoi(W.freed[0]); }
   function fakeobj(a) { W.freed[0] = itof(a); return W.boxed[0]; }
