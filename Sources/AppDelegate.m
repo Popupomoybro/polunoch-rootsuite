@@ -280,14 +280,14 @@ static void refreshRootPill(void) {
 
     self.modules = [NSMutableArray array];
 #define ADD(n, d, s, sel) [self.modules addObject:@{@"name":@(n), @"desc":@(d), @"status":s, @"block":[^{ return RunModule(@(n)); } copy], @"auto":@(sel)}]
-    ADD("worse_query container escape", "PUBLIC/UNPATCHED: R/W in every app container (26.0-26.7.2)", @"PUBLIC", YES);
-    ADD("Sandbox: bad_query escape", "READ grants on /System and /usr/lib - live probe", @"PROVEN", YES);
-    ADD("bl_sbx: itunesstored", "PUBLIC exploit: write as uid 501, listed for 26.2b1", @"PUBLIC", YES);
-    ADD("Root-owned file read", "SystemVersion, Keychains, master.passwd - proof of access", @"PROVEN", YES);
-    ADD("WebKit DFG UAF", "CVE-2025-43529: addrof + fakeobj, in-app WebView", @"PROVEN", YES);
-    ADD("dyld PAC oracle", "CVE-2026-20700: dyld writes a resolved pointer into our slot", @"PROVEN", YES);
-    ADD("Kernel posture", "bootargs, AMFI, CSR, tfp0, unrestrictfs - what is open", @"MEASURED", YES);
-    ADD("Privileged Mach services", "host special ports and user clients - what opens", @"TEST", YES);
+    ADD("worse_query container escape", "PUBLIC/UNPATCHED: R/W in every app container (26.0-26.7.2)", @"PUBLIC", NO);
+    ADD("Sandbox: bad_query escape", "READ grants on /System and /usr/lib - live probe", @"PROVEN", NO);
+    ADD("bl_sbx: itunesstored", "PUBLIC exploit: write as uid 501, listed for 26.2b1", @"PUBLIC", NO);
+    ADD("Root-owned file read", "SystemVersion, Keychains, master.passwd - proof of access", @"PROVEN", NO);
+    ADD("WebKit DFG UAF", "CVE-2025-43529: addrof + fakeobj, in-app WebView", @"PROVEN", NO);
+    ADD("dyld PAC oracle", "CVE-2026-20700: dyld writes a resolved pointer into our slot", @"PROVEN", NO);
+    ADD("Kernel posture", "bootargs, AMFI, CSR, tfp0, unrestrictfs - what is open", @"MEASURED", NO);
+    ADD("Privileged Mach services", "host special ports and user clients - what opens", @"TEST", NO);
     ADD("IOHID float->int", "73 conversion sites, 51 round-up - user client gated", @"MEASURED", NO);
     ADD("IOSurface format-class", "7 formats, locked=7 / mismatch=0", @"MEASURED", NO);
     ADD("AVE2 user client", "IOServiceOpen 0xe00002e2 - gated by the sandbox", @"GATED", NO);
@@ -297,12 +297,10 @@ static void refreshRootPill(void) {
     ADD("HFS flag-nibble", "5/5 on 26.2b1 vs 0/5 on 26.6 (kernel diff)", @"DIFF", NO);
 #undef ADD
 
-    self.selected = [NSMutableIndexSet indexSet];
-    for (NSUInteger i = 0; i < self.modules.count; i++)
-        if ([self.modules[i][@"auto"] boolValue]) [self.selected addIndex:i];
+    self.selected = [NSMutableIndexSet indexSet];   // nothing preselected
 
     AvePost([NSString stringWithFormat:@"launched modules=%lu", (unsigned long)self.modules.count]);
-    AveLog(@"[*] RootSuite ready. Pick modules, then Run.");
+    AveLog(@"[*] RootSuite ready: tap a module to select it, then Run.");
     AveLog(@"[*] Sileo / Term    root.");
     refreshRootPill();
     [self updateRunTitle];

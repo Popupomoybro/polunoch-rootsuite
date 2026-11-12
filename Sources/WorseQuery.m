@@ -77,7 +77,7 @@ static int64_t wq(const char *group, const char *target, uint64_t flags) {
 NSString *ModWorseQuery(void) {
     // our own app group (the standard, non-private entitlement)
     NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-    NSString *grp = [NSString stringWithFormat:@"group.cc.forcequit.bad-query"];
+    NSString *grp = [NSString stringWithFormat:@"group.%@", [[NSBundle mainBundle] bundleIdentifier]];
     (void)bid;
     NSFileManager *fm = [NSFileManager defaultManager];
 
