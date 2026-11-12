@@ -18,6 +18,7 @@ clang -isysroot "$SDK" -target arm64-apple-ios15.0 -O1 \
 
 cp Resources/Info.plist        "$OUT/Payload/$APP.app/"
 cp Resources/entitlements.plist "$OUT/Payload/$APP.app/"
+cp Resources/*.js              "$OUT/Payload/$APP.app/"    # the JSC scripts, loaded at run time
 cp Resources/libexports.dylib  "$OUT/Payload/$APP.app/" 2>/dev/null || true
 cp Resources/libclient.dylib   "$OUT/Payload/$APP.app/" 2>/dev/null || true
 cp Resources/Frameworks/libmalformed.dylib "$OUT/Payload/$APP.app/Frameworks/" 2>/dev/null || true

