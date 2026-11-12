@@ -1,8 +1,13 @@
 #import <Foundation/Foundation.h>
 #import <WebKit/WebKit.h>
+#import <JavaScriptCore/JavaScriptCore.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
+#import <mach/mach.h>
+#import <mach/mach_port.h>
+#import <CoreFoundation/CoreFoundation.h>
+#import <IOKit/IOKitLib.h>
 #import <string.h>
 #import <stdio.h>
 #import "Modules.h"
@@ -111,21 +116,25 @@ static const char *kStructScan = R"JS(
 })()
 )JS";
 
-// Run arbitrary JS in a private WKWebView and return its string result.
+// Run arbitrary JS in a JSContext (JavaScriptCore inside our own process) and
+// return its string result.  A WKWebView would need WebKit2, which traps on this
+// build inside a sideloaded app.
 static NSString *RunJS(const char *js, int timeoutSec) {
-    WKWebView *wv = [[WKWebView alloc] initWithFrame:CGRectZero];
-    [wv loadHTMLString:@"<html><body></body></html>" baseURL:nil];
-    dispatch_semaphore_t s = dispatch_semaphore_create(0);
-    __block NSString *res = @"(no answer)";
-    [wv evaluateJavaScript:[NSString stringWithUTF8String:js]
-      completionHandler:^(id v, NSError *e) {
-        if (e) res = e.localizedDescription ?: @"error";
-        else if ([v isKindOfClass:[NSString class]]) res = v;
-        else res = [v description];
-        dispatch_semaphore_signal(s);
-    }];
-    dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, timeoutSec * NSEC_PER_SEC));
-    [wv stopLoading]; wv = nil;
+    @autoreleasepool {
+        JSContext *ctx = [[JSContext alloc] init];
+        dispatch_semaphore_t s = dispatch_semaphore_create(0);
+        __block NSString *res = @"(no answer)";
+        [ctx evaluateScript:[NSString stringWithUTF8String:js]
+        completionHandler:^(JSValue *v, JSValue *err) {
+            res = [v isKindOfClass:[NSString class]] ? v : [[v description] ?: @"?" copy];
+            if (err && ![err isUndefined]) res = [err toString] ?: @"js error";
+            dispatch_semaphore_signal(s);
+        }];
+        dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, timeoutSec * NSEC_PER_SEC));
+        ctx = nil;
+        return res;
+    }
+}
     return res;
 }
 
@@ -266,19 +275,17 @@ NSString *ModDyldOracle(void) {
 // validation is correct on this build.
 // ---------------------------------------------------------------------------
 NSString *ModGPU(void) {
-    WKWebView *wv = [[WKWebView alloc] initWithFrame:CGRectZero];
-    [wv loadHTMLString:@"<html><body></body></html>" baseURL:nil];
-    dispatch_semaphore_t s = dispatch_semaphore_create(0);
-    __block NSString *res = @"(no answer)";
-    NSString *js = @"(function(){var c=document.createElement('canvas');var g=c.getContext('webgl2');"
-                   @"if(!g)return 'no-webgl2';var d=g.getExtension('WEBGL_debug_renderer_info');"
-                   @"var r=d?g.getParameter(d.UNMASKED_RENDERER_WEBGL):g.getParameter(g.RENDERER);"
-                   @"return g.getParameter(g.VERSION)+' | '+r;})()";
-    [wv evaluateJavaScript:js completionHandler:^(id v, NSError *e) {
-        res = [v isKindOfClass:[NSString class]] ? v : @"?";
-        dispatch_semaphore_signal(s);
-    }];
-    dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC));
-    [wv stopLoading]; wv = nil;
-    return S(@"WebGL: %@", res);
+    CFMutableDictionaryRef m = IOServiceMatching("IOSurfaceRoot");
+    io_service_t d = m ? IOServiceGetMatchingService(kIOMainPortDefault, m) : 0;
+    BOOL present = (d != 0);
+    io_connect_t c = 0;
+    kern_return_t kr = present ? IOServiceOpen(d, mach_task_self(), 0, &c) : (kern_return_t)-1;
+    if (kr == KERN_SUCCESS && c) IOServiceClose(c);
+    if (present) IOObjectRelease(d);
+    if (m) CFRelease(m);
+    if (kr == KERN_SUCCESS)
+        return @"GPU surface: IOSurfaceRoot user client OPEN (in-app WebGL unavailable: "
+               @"WebKit2 traps inside a sideloaded build)";
+    return S(@"GPU surface: IOSurfaceRoot present=%d IOServiceOpen=%#x "
+             @"(in-app WebGL unavailable on this build)", present ? 1 : 0, kr);
 }

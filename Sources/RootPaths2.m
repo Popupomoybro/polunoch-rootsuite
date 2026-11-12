@@ -112,17 +112,7 @@ static const char *kFakeRW = R"JS(
 
 NSString *ModJscFakeRW(void) {
     AveLog(@"    JSC fake-object R/W (structure ID -> in-object slots -> TypedArray length)");
-    WKWebView *wv = [[WKWebView alloc] initWithFrame:CGRectZero];
-    [wv loadHTMLString:@"<html><body></body></html>" baseURL:nil];
-    dispatch_semaphore_t s = dispatch_semaphore_create(0);
-    __block NSString *res = @"(no answer)";
-    [wv evaluateJavaScript:[NSString stringWithUTF8String:kFakeRW]
-      completionHandler:^(id v, NSError *e) {
-        res = [v isKindOfClass:[NSString class]] ? v : [v description];
-        dispatch_semaphore_signal(s);
-    }];
-    dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, 240 * NSEC_PER_SEC));
-    [wv stopLoading]; wv = nil;
+    NSString *res = RunJS(kFakeRW, 240);
     AveLog([NSString stringWithFormat:@"    fake-object result: %@", res]);
     if ([res containsString:@"\"oob\":true"]) {
         AveSetStatus(@"OOB read/write ACTIVE (TypedArray length corrupted)");

