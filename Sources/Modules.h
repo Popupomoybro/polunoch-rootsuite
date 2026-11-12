@@ -64,6 +64,8 @@ NSString *RunKernelPath(NSString *name);
 
 NSString *ModJscScribbleRW(void);
 
+NSString *ModUnifiedPrimitives(void);
+
 // dispatchers
 NSString *RunModule(NSString *name);
 NSString *RunRootPath(NSString *name);
