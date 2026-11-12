@@ -120,7 +120,10 @@ static const char *kStructScan = R"JS(
 // return its string result.  A WKWebView would need WebKit2, which traps on this
 // build inside a sideloaded app.
 static NSString *RunJS(const char *js, int timeoutSec) {
+    (void)timeoutSec;
     @autoreleasepool {
+        JSContext *ctx = [[JSContext alloc] init];
+        NSString *res = @"(no answer)";
         @try {
             JSValue *v = [ctx evaluateScript:[NSString stringWithUTF8String:js]];
             if ([ctx exception]) res = [[ctx exception] toString] ?: @"js exception";
