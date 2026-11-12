@@ -36,8 +36,6 @@ extern kern_return_t mach_vm_write(vm_map_t t, mach_vm_address_t a, vm_offset_t 
 extern kern_return_t bootstrap_look_up(mach_port_t bootstrap_port,
                                         const char *service_name,
                                         mach_port_t *server_port);
-extern kern_return_t task_get_bootstrap_port(task_t task,
-                                         mach_port_t *bootstrap_port);
 // every module below is a step that logically leads to uid 0.
 // Group A: task/credential surface
 // ===========================================================================
