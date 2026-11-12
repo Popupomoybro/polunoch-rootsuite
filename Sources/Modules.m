@@ -373,7 +373,7 @@ NSString *RunModule(NSString *name) {
     if ([name hasPrefix:@"GPU"])           return ModGPU();
     if ([name hasPrefix:@"Privileged"])    return ModPrivilegedServices();
     if ([name hasPrefix:@"IOSkywalk"])   return ModIOSkywalk();
-    if ([name hasPrefix:@"ND6"])         return ModND6();
+    if ([name containsString:@"ND6"])          return ModND6();
     if ([name hasPrefix:@"HFS"])         return ModHFS();
     if ([name hasPrefix:@"CoreDevice"])  return ModCoreDevice();
     return @"module not found";
