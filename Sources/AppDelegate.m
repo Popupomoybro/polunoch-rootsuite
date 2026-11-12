@@ -279,33 +279,33 @@ static void refreshRootPill(void) {
     [self.window makeKeyAndVisible];
 
     self.modules = [NSMutableArray array];
-#define ADD(n, d, s, sel) [self.modules addObject:@{@"name":@(n), @"desc":@(d), @"status":@s, @"block":[^{ return RunRootPath(@(n)) ?: RunModule(@(n)); } copy], @"auto":@(sel)}]
-    ADD("worse_query container escape", "PUBLIC, unpatched on 26.0-26.7.2: read/write every app container", @"PUBLIC", NO);
-    ADD("bl_sbx: itunesstored", "PUBLIC: arbitrary write as uid 501, MobileGestalt cache", @"PUBLIC", NO);
-    ADD("Sandbox: bad_query escape", "PROVEN: READ grants on /System and /usr/lib", @"PROVEN", NO);
-    ADD("Root-owned file read", "PROVEN: SystemVersion, Keychains, master.passwd", @"PROVEN", NO);
-    ADD("task_for_pid root sweep", "task port of a root pid -> its memory, its code, its identity", @"KERNEL", NO);
-    ADD("mach_vm R/W primitives", "the read/write step a task port unlocks", @"KERNEL", NO);
-    ADD("setuid-root binary scan", "setuid helpers reachable through the escape", @"KERNEL", NO);
-    ADD("IOKit reachable classes", "user clients an app can open = kernel attack surface", @"KERNEL", NO);
-    ADD("daemon surface: Mach services", "privileged daemons answering from the container", @"PIVOT", NO);
-    ADD("daemon pivot: writable paths", "paths a root daemon reads that we can write", @"PIVOT", NO);
-    ADD("daemon pivot: container write", "our writes landing in other containers", @"PIVOT", NO);
-    ADD("WebKit DFG UAF", "PROVEN: addrof + fakeobj (CVE-2025-43529)", @"PROVEN", NO);
-    ADD("JSC structure-ID scan", "the missing piece: in-object R/W without PAC", @"JSC", NO);
-    ADD("JSC fake-object R/W", "arbitrary read/write through a real structure ID", @"JSC", NO);
-    ADD("dyld PAC oracle", "PROVEN: dyld writes a resolved pointer into our slot", @"PROVEN", NO);
-    ADD("Kernel posture", "bootargs, AMFI, CSR, tfp0, unrestrictfs", @"LIVE", NO);
-    ADD("IOHID float->int sites", "73 conversion sites - user client gated today", @"KERNEL", NO);
-    ADD("IOSurface format-class", "format consistency, locked=7 / mismatch=0", @"KERNEL", NO);
-    ADD("AVE2 user client", "IOServiceOpen 0xe00002e2 - gated by the sandbox", @"KERNEL", NO);
-    ADD("IOSurfaceRoot selectors", "externalMethod sweep on a reachable root client", @"KERNEL", NO);
-    ADD("GPU / WebGL", "WebKit WebGL, PBO validation correct (ANGLE absent)", @"GPU", NO);
-    ADD("IOSkywalk varint (LAN)", "off-by-one in the parser - needs a LAN frame", @"LAN", NO);
-    ADD("XNU ND6 options (LAN)", "4 missing checks - needs a LAN frame", @"LAN", NO);
-    ADD("HFS flag-nibble", "5/5 on 26.2b1 vs 0/5 on 26.6", @"KERNEL", NO);
-    ADD("GPU process carrier", "offscreen GL surface as the GPU-process entry", @"GPU", NO);
-#undef ADD
+
+    [self.modules addObject:@{@"name":@"worse_query container escape", @"desc":@"PUBLIC, unpatched on 26.0-26.7.2: read/write every app container", @"status":@"PUBLIC", "@"block":[^{ return RunRootPath(@"worse_query container escape") ?: RunModule(@"worse_query container escape"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"bl_sbx: itunesstored", @"desc":@"PUBLIC: arbitrary write as uid 501, MobileGestalt cache", @"status":@"PUBLIC", "@"block":[^{ return RunRootPath(@"bl_sbx: itunesstored") ?: RunModule(@"bl_sbx: itunesstored"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"Sandbox: bad_query escape", @"desc":@"PROVEN: READ grants on /System and /usr/lib", @"status":@"PROVEN", "@"block":[^{ return RunRootPath(@"Sandbox: bad_query escape") ?: RunModule(@"Sandbox: bad_query escape"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"Root-owned file read", @"desc":@"PROVEN: SystemVersion, Keychains, master.passwd", @"status":@"PROVEN", "@"block":[^{ return RunRootPath(@"Root-owned file read") ?: RunModule(@"Root-owned file read"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"task_for_pid root sweep", @"desc":@"task port of a root pid -> its memory, its code, its identity", @"status":@"KERNEL", "@"block":[^{ return RunRootPath(@"task_for_pid root sweep") ?: RunModule(@"task_for_pid root sweep"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"mach_vm R/W primitives", @"desc":@"the read/write step a task port unlocks", @"status":@"KERNEL", "@"block":[^{ return RunRootPath(@"mach_vm R/W primitives") ?: RunModule(@"mach_vm R/W primitives"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"setuid-root binary scan", @"desc":@"setuid helpers reachable through the escape", @"status":@"KERNEL", "@"block":[^{ return RunRootPath(@"setuid-root binary scan") ?: RunModule(@"setuid-root binary scan"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"IOKit reachable classes", @"desc":@"user clients an app can open = kernel attack surface", @"status":@"KERNEL", "@"block":[^{ return RunRootPath(@"IOKit reachable classes") ?: RunModule(@"IOKit reachable classes"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"daemon surface: Mach services", @"desc":@"privileged daemons answering from the container", @"status":@"PIVOT", "@"block":[^{ return RunRootPath(@"daemon surface: Mach services") ?: RunModule(@"daemon surface: Mach services"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"daemon pivot: writable paths", @"desc":@"paths a root daemon reads that we can write", @"status":@"PIVOT", "@"block":[^{ return RunRootPath(@"daemon pivot: writable paths") ?: RunModule(@"daemon pivot: writable paths"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"daemon pivot: container write", @"desc":@"our writes landing in other containers", @"status":@"PIVOT", "@"block":[^{ return RunRootPath(@"daemon pivot: container write") ?: RunModule(@"daemon pivot: container write"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"WebKit DFG UAF", @"desc":@"PROVEN: addrof + fakeobj (CVE-2025-43529)", @"status":@"PROVEN", "@"block":[^{ return RunRootPath(@"WebKit DFG UAF") ?: RunModule(@"WebKit DFG UAF"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"JSC structure-ID scan", @"desc":@"the missing piece: in-object R/W without PAC", @"status":@"JSC", "@"block":[^{ return RunRootPath(@"JSC structure-ID scan") ?: RunModule(@"JSC structure-ID scan"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"JSC fake-object R/W", @"desc":@"arbitrary read/write through a real structure ID", @"status":@"JSC", "@"block":[^{ return RunRootPath(@"JSC fake-object R/W") ?: RunModule(@"JSC fake-object R/W"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"dyld PAC oracle", @"desc":@"PROVEN: dyld writes a resolved pointer into our slot", @"status":@"PROVEN", "@"block":[^{ return RunRootPath(@"dyld PAC oracle") ?: RunModule(@"dyld PAC oracle"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"Kernel posture", @"desc":@"bootargs, AMFI, CSR, tfp0, unrestrictfs", @"status":@"LIVE", "@"block":[^{ return RunRootPath(@"Kernel posture") ?: RunModule(@"Kernel posture"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"IOHID float->int sites", @"desc":@"73 conversion sites - user client gated today", @"status":@"KERNEL", "@"block":[^{ return RunRootPath(@"IOHID float->int sites") ?: RunModule(@"IOHID float->int sites"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"IOSurface format-class", @"desc":@"format consistency, locked=7 / mismatch=0", @"status":@"KERNEL", "@"block":[^{ return RunRootPath(@"IOSurface format-class") ?: RunModule(@"IOSurface format-class"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"AVE2 user client", @"desc":@"IOServiceOpen 0xe00002e2 - gated by the sandbox", @"status":@"KERNEL", "@"block":[^{ return RunRootPath(@"AVE2 user client") ?: RunModule(@"AVE2 user client"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"IOSurfaceRoot selectors", @"desc":@"externalMethod sweep on a reachable root client", @"status":@"KERNEL", "@"block":[^{ return RunRootPath(@"IOSurfaceRoot selectors") ?: RunModule(@"IOSurfaceRoot selectors"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"GPU / WebGL", @"desc":@"WebKit WebGL, PBO validation correct (ANGLE absent)", @"status":@"GPU", "@"block":[^{ return RunRootPath(@"GPU / WebGL") ?: RunModule(@"GPU / WebGL"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"IOSkywalk varint (LAN)", @"desc":@"off-by-one in the parser - needs a LAN frame", @"status":@"LAN", "@"block":[^{ return RunRootPath(@"IOSkywalk varint (LAN)") ?: RunModule(@"IOSkywalk varint (LAN)"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"XNU ND6 options (LAN)", @"desc":@"4 missing checks - needs a LAN frame", @"status":@"LAN", "@"block":[^{ return RunRootPath(@"XNU ND6 options (LAN)") ?: RunModule(@"XNU ND6 options (LAN)"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"HFS flag-nibble", @"desc":@"5/5 on 26.2b1 vs 0/5 on 26.6", @"status":@"KERNEL", "@"block":[^{ return RunRootPath(@"HFS flag-nibble") ?: RunModule(@"HFS flag-nibble"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"GPU process carrier", @"desc":@"offscreen GL surface as the GPU-process entry", @"status":@"GPU", "@"block":[^{ return RunRootPath(@"GPU process carrier") ?: RunModule(@"GPU process carrier"); } copy], @"auto":@(NO)}];
+
 
     self.selected = [NSMutableIndexSet indexSet];   // nothing preselected
 
