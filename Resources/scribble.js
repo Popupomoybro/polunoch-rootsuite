@@ -145,5 +145,11 @@
   // post the answer from inside the script too, so it is in the log even if
   // the return trip through Objective-C never completes
   aveStep('RESULT ' + answer);
+  // Hold the thread for a moment BEFORE returning: the ObjC side formats the
+  // result the instant evaluateScript: returns, and the verdict POSTs are
+  // asynchronous.  Without this hold the last lines are still in flight when
+  // the app dies and the verdict is lost with them.
+  var hold0 = Date.now();
+  while (Date.now() - hold0 < 4000) { }
   return answer;
 })()
