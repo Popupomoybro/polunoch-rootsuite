@@ -16,6 +16,7 @@
 #import "Root.h"
 #import "Util.h"
 #import "AppDelegate.h"
+#import "JSRun.h"
 
 // ---------------------------------------------------------------------------
 // JSC fake-object R/W
@@ -28,38 +29,6 @@
 // The JSC script lives in Resources/fakerw.js and is loaded at run time:
 // no JS is ever inlined into the Objective-C lexer.
 
-
-static NSString *RunJS(NSString *js, NSString *tag) {
-    @autoreleasepool {
-        JSContext *ctx = [[JSContext alloc] init];
-        NSString *res = @"(no answer)";
-        ctx[@"aveStep"] = ^(id s) {
-            NSString *line = [s isKindOfClass:[NSString class]] ? s : @"?";
-            AveLog([NSString stringWithFormat:@"    js. %@", line]);
-            AvePost([NSString stringWithFormat:@"%@ STEP %@", tag, line]);
-        };
-        @try {
-            JSValue *v = [ctx evaluateScript:js];
-            JSValue *exc = [ctx exception];
-            if (exc) {
-                id o = [exc toObject];          // sanctioned bridge, no JS re-entry
-                res = [o isKindOfClass:[NSString class]] ? o : [o description];
-            } else if (v) {
-                if ([v isKindOfClass:[NSString class]]) res = v;
-                else {
-                    id o = [v toObject];
-                    res = [o isKindOfClass:[NSString class]] ? o : [o description];
-                }
-            }
-        } @catch (NSException *e) {
-            res = [NSString stringWithFormat:@"exception %@", e.reason];
-        }
-        ctx = nil;
-        if (![res isKindOfClass:[NSString class]]) res = @"(no answer)";
-        return res;
-    }
-}
-
 NSString *ModJscFakeRW(void) {
     AveLog(@"    JSC fake-object R/W (structure ID -> in-object slots -> TypedArray length)");
     NSString *src = LoadJS(@"fakerw.js");
@@ -67,7 +36,7 @@ NSString *ModJscFakeRW(void) {
         AvePost(@"FAKERW fakerw.js missing from the bundle");
         return @"fakerw.js missing from the bundle";
     }
-    NSString *res = RunJS(src, @"FAKERW");
+    NSString *res = RunJSBigStack(src, @"FAKERW", 240);
     AveLog([NSString stringWithFormat:@"    fake-object result: %@", res]);
     if ([res containsString:@"\"oob\":true"]) {
         AveSetStatus(@"OOB read/write ACTIVE (TypedArray length corrupted)");

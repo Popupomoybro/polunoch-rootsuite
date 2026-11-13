@@ -10,6 +10,7 @@
 #import "Root.h"
 #import "Util.h"
 #import "AppDelegate.h"
+#import "JSRun.h"
 
 // ===========================================================================
 // One process, both primitives.
@@ -25,36 +26,6 @@
 // phase inside guard() and always answers with a JSON string, and its hunt is
 // wall-clock bounded with live progress.
 // ===========================================================================
-static NSString *RunJS(NSString *src, NSString *tag) {
-    @autoreleasepool {
-        JSContext *ctx = [[JSContext alloc] init];
-        NSString *res = @"(no answer)";
-        ctx[@"aveStep"] = ^(id s) {
-            NSString *line = [s isKindOfClass:[NSString class]] ? s : @"?";
-            AveLog([NSString stringWithFormat:@"    js. %@", line]);
-            AvePost([NSString stringWithFormat:@"%@ STEP %@", tag, line]);
-        };
-        [ctx evaluateScript:@"1+1"];
-        @try {
-            JSValue *v = [ctx evaluateScript:src];
-            JSValue *exc = [ctx exception];
-            if (exc) {
-                id o = [exc toObject];          // sanctioned bridge, no JS re-entry
-                res = [o isKindOfClass:[NSString class]] ? o : [o description];
-            } else if (v) {
-                if ([v isKindOfClass:[NSString class]]) res = v;
-                else {
-                    id o = [v toObject];
-                    res = [o isKindOfClass:[NSString class]] ? o : [o description];
-                }
-            }
-        } @catch (NSException *e) {
-            res = [NSString stringWithFormat:@"exception %@", e.reason];
-        }
-        if (![res isKindOfClass:[NSString class]]) res = @"(no answer)";
-        return res;
-    }
-}
 
 NSString *ModUnifiedPrimitives(void) {
     AveLog(@"    unified: JSC UAF inside OUR JSContext, then the dyld oracle in the SAME process");
@@ -64,7 +35,7 @@ NSString *ModUnifiedPrimitives(void) {
         AvePost(@"UNIFIED unified.js missing from the bundle");
         return @"unified.js missing from the bundle";
     }
-    NSString *res = RunJS(src, @"UNIFIED");
+    NSString *res = RunJSBigStack(src, @"UNIFIED", 240);
     AveLog([NSString stringWithFormat:@"    JSC chain: %@", res]);
     char q = '"';
     NSString *ready = [NSString stringWithFormat:@"%cready%c:true", q, q];
