@@ -24,49 +24,58 @@
 // the warmup phase and the trigger never fired in 4875 shaved rounds.
 // ---------------------------------------------------------------------------
 static inline NSString *RunJSBigStack(NSString *src, NSString *tag, NSInteger timeoutSec) {
-    __block NSString *res = @"(no answer)";
-    if (!src || !src.length) return @"(no script)";
-    dispatch_semaphore_t done = dispatch_semaphore_create(0);
-    NSThread *t = [[NSThread alloc] initWithBlock:^{
-        @autoreleasepool {
-            JSContext *ctx = [[JSContext alloc] init];
-            ctx[@"aveStep"] = ^(id s) {
-                NSString *line = [s isKindOfClass:[NSString class]] ? s : @"?";
-                AveLog([NSString stringWithFormat:@"    js. %@", line]);
-                AvePost([NSString stringWithFormat:@"%@ STEP %@", tag, line]);
-            };
-            @try {
-                JSValue *v = [ctx evaluateScript:src];
-                JSValue *exc = [ctx exception];
-                if (exc) {
-                    // toObject() is the sanctioned bridge and does not re-enter
-                    // JS the way -[JSValue toString] does (which used to BRK in
-                    // objc_opt_respondsToSelector and kill the app).
-                    id o = [exc toObject];
-                    res = [o isKindOfClass:[NSString class]] ? o : [o description];
-                } else if (v) {
-                    if ([v isKindOfClass:[NSString class]]) res = v;
-                    else {
-                        id o = [v toObject];
-                        res = [o isKindOfClass:[NSString class]] ? o : [o description];
+    // The answer travels inside a holder that BOTH the caller and the block keep
+    // alive.  A plain `__block NSString *res` is released the moment the thread
+    // destroys its block -- which happens immediately after the semaphore
+    // signal, i.e. while the caller is still about to read res.  The object is
+    // deallocated under the caller's feet and formatting it BRKs in
+    // objc_opt_respondsToSelector (device-crash-classic, seen at
+    // "scribble result: %@").  The array survives both releases.
+    NSMutableArray *box = [NSMutableArray array];
+    if (src && src.length) {
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        NSThread *t = [[NSThread alloc] initWithBlock:^{
+            @autoreleasepool {
+                JSContext *ctx = [[JSContext alloc] init];
+                ctx[@"aveStep"] = ^(id s) {
+                    NSString *line = [s isKindOfClass:[NSString class]] ? s : @"?";
+                    AveLog([NSString stringWithFormat:@"    js. %@", line]);
+                    AvePost([NSString stringWithFormat:@"%@ STEP %@", tag, line]);
+                };
+                id answer = nil;
+                @try {
+                    JSValue *v = [ctx evaluateScript:src];
+                    JSValue *exc = [ctx exception];
+                    if (exc) {
+                        // toObject() is the sanctioned bridge and does not re-enter
+                        // JS the way -[JSValue toString] does.
+                        id o = [exc toObject];
+                        answer = [o isKindOfClass:[NSString class]] ? o : nil;
+                    } else if (v) {
+                        if ([v isKindOfClass:[NSString class]]) answer = v;
+                        else {
+                            id o = [v toObject];
+                            answer = [o isKindOfClass:[NSString class]] ? o : nil;
+                        }
                     }
+                } @catch (NSException *e) {
+                    answer = [NSString stringWithFormat:@"exception %@", e.reason];
                 }
-            } @catch (NSException *e) {
-                res = [NSString stringWithFormat:@"exception %@", e.reason];
+                ctx = nil;
+                // only ever a real NSString leaves this thread
+                [box addObject:[answer isKindOfClass:[NSString class]] ? answer : @"(non-string)"];
             }
-            ctx = nil;
-            if (![res isKindOfClass:[NSString class]]) res = @"(no answer)";
+            dispatch_semaphore_signal(done);
+        }];
+        t.stackSize = 8 * 1024 * 1024;          // like a WebKit WebThread
+        [t start];
+        if (dispatch_semaphore_wait(done,
+                dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeoutSec * NSEC_PER_SEC)) != 0) {
+            AvePost([NSString stringWithFormat:@"%@ TIMEOUT after %lds (thread kept running)",
+                     tag, (long)timeoutSec]);
         }
-        dispatch_semaphore_signal(done);
-    }];
-    t.stackSize = 8 * 1024 * 1024;          // like a WebKit WebThread
-    [t start];
-    if (dispatch_semaphore_wait(done,
-            dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeoutSec * NSEC_PER_SEC)) != 0) {
-        AvePost([NSString stringWithFormat:@"%@ TIMEOUT after %lds (thread kept running)",
-                 tag, (long)timeoutSec]);
     }
-    return res;
+    return box.count ? box[0] : @"(no script)";
 }
 
 // Prefer a live copy served over HTTP, fall back to the copy in the bundle.
