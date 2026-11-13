@@ -1,4 +1,4 @@
-(function () {
+﻿(function () {
   var out = { step: [], exp: {}, guard: [], phase: 'start' };
   function guard(name, fn) {
     out.phase = name;
@@ -21,7 +21,7 @@
   var OFF = 0x0002000000000000n;
   var HDR = 0x07n | (0x2Bn << 40n) | (1n << 56n);   // ArrayWithDouble | ArrayType | White
 
-  var BUDGET = 150000, t0 = Date.now(), rounds = 0;
+  var BUDGET = 60000, t0 = Date.now(), rounds = 0;
   var arr, arr_index, W = null, HA, SA, gap, changeArr, holder, scribble;
 
   function foo(flag, k, allocCount) {
@@ -80,7 +80,9 @@
     }
   });
   out.exp.rounds = rounds;
+  aveStep('post-loop: rounds=' + rounds);
   out.exp.huntMs = Date.now() - t0;
+  aveStep('post-loop: huntMs=' + out.exp.huntMs);
   aveStep('hunt finished: rounds=' + rounds + ' in ' + out.exp.huntMs +
           'ms, trigger=' + (W ? 'FIRED at round ' + W.round : 'no'));
 

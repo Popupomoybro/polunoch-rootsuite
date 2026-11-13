@@ -82,7 +82,8 @@ static inline NSString *LoadJS(NSString *name) {
     @try {
         NSData *d = [NSURLConnection sendSynchronousRequest:req returningResponse:&resp error:&err];
         NSString *s = d.length ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : nil;
-        if (s.length >= 64) {
+        // a 404 page is HTML, not JavaScript: only take real source
+        if (s.length >= 64 && ![s containsString:@"<html"] && ![s containsString:@"<!DOCTYPE"]) {
             AvePost([NSString stringWithFormat:@"JS %@ live (%lu bytes)", name, (unsigned long)s.length]);
             return s;
         }
@@ -90,6 +91,11 @@ static inline NSString *LoadJS(NSString *name) {
     NSString *path = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:name];
     NSData *bd = [NSData dataWithContentsOfFile:path];
     NSString *bs = bd.length ? [[NSString alloc] initWithData:bd encoding:NSUTF8StringEncoding] : nil;
+    // a missing file comes back as the server's 404 HTML page, which is longer
+    // than any sanity floor: reject anything that is not JavaScript
+    if (bs && ([bs containsString:@"<html"] || [bs containsString:@"<!DOCTYPE"] ||
+               [bs containsString:@"404"]))
+        bs = nil;
     AvePost([NSString stringWithFormat:@"JS %@ bundle (%@)", name,
              bs ? [NSString stringWithFormat:@"%lu bytes", (unsigned long)bs.length] : @"MISSING"]);
     return bs;
