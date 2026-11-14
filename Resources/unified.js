@@ -1,4 +1,4 @@
-(function () {
+﻿(function () {
   var out = { step: [], exp: {}, guard: [], phase: 'start' };
   function guard(name, fn) {
     out.phase = name;
@@ -18,7 +18,7 @@
   var ftoi = function (f) { d[0] = f; return u[0]; };
   var OFF = 0x0002000000000000n;
   var HDR = 0x07n | (0x2Bn << 40n) | (1n << 56n);
-  var BUDGET = 150000, t0 = Date.now(), rounds = 0;
+  var BUDGET = 1200, t0 = Date.now(), rounds = 0;
   var arr, arr_index, W = null, HA, gap, changeArr, holder, scribble;
 
   function foo(flag, k, allocCount) {
@@ -126,3 +126,4 @@
   aveStep('RESULT ' + answer);
   return answer;
 })()
+

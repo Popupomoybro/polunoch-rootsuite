@@ -25,7 +25,7 @@
   // got 647 rounds in a 60 s budget (93 ms/round -- verified on device), so the
   // budget is what decides whether the reclaim ever gets its chance, not the
   // mechanism.  10 minutes = ~6400 honest attempts.
-  var BUDGET = 220000, t0 = Date.now(), rounds = 0;
+  var BUDGET = 1200, t0 = Date.now(), rounds = 0;
   var arr, arr_index, W = null, HA, SA, gap, changeArr, holder, scribble;
 
   function foo(flag, k, allocCount) {
@@ -165,4 +165,5 @@
   while (Date.now() - hold0 < 4000) { }
   return answer;
 })()
+
 
