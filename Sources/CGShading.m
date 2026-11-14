@@ -41,8 +41,8 @@ static NSString *ModRenderPDF(NSString *pdfName, NSString *tag) {
         return [NSString stringWithFormat:@"%@: not a readable PDF (%@)", tag, pdfName];
     }
     size_t pages = CGPDFDocumentGetNumberOfPages(doc);
-    AvePost([NSString stringWithFormat:@"%@ pages=%zu canary BEFORE render of %@",
-             tag, (unsigned long)pages, pdfName]);
+    AveLog([NSString stringWithFormat:@"    %@: pages=%zu, canary BEFORE render of %@",
+           tag, (unsigned long)pages, pdfName]);
 
     CGPDFPageRef page = CGPDFDocumentGetPage(doc, 1);
     CGRect box = CGPDFPageGetBoxRect(page, kCGPDFMediaBox);
@@ -57,9 +57,11 @@ static NSString *ModRenderPDF(NSString *pdfName, NSString *tag) {
         CGPDFDocumentRelease(doc);
         return [NSString stringWithFormat:@"%@: no bitmap context", tag];
     }
+    AveLog([NSString stringWithFormat:@"    %@: canary BEFORE render of %@", tag, pdfName]);
     CGContextDrawPDFPage(ctx, page);      // <-- the write happens in this call
     CGContextRelease(ctx);
 
+    AveLog([NSString stringWithFormat:@"    %@: canary AFTER render (survived)", tag]);
     AvePost([NSString stringWithFormat:@"%@ canary AFTER render (survived)", tag]);
     CGPDFDocumentRelease(doc);
     return [NSString stringWithFormat:@"%@: render returned without a fault (%@)", tag, pdfName];
@@ -68,15 +70,15 @@ static NSString *ModRenderPDF(NSString *pdfName, NSString *tag) {
 NSString *ModCGShadingOOB(void) {
     AveLog(@"    CG Type-5 shading: CVE-2026-112611 OOB write (gate absent on 26.2b1)");
     // control first: a benign, in-bounds shading must render cleanly.  If the
-    // CONTROL dies, the render path itself is the problem, not the bug.
+    // CONTROL faults, the render path itself is the problem, not the bug.
     NSString *ctl = ModRenderPDF(@"control_shading_type5.pdf", @"CG-CTL");
     AveLog([NSString stringWithFormat:@"    control: %@", ctl]);
     AvePost([NSString stringWithFormat:@"CGCTL %@", ctl]);
-    if ([ctl containsString:@"survived"]) {
+    if ([ctl containsString:@"without a fault"]) {
         NSString *r = ModRenderPDF(@"crash_shading_type5.pdf", @"CG-OOB");
         AveLog([NSString stringWithFormat:@"    oracle: %@", r]);
         AvePost([NSString stringWithFormat:@"CGOOB %@", r]);
         return [NSString stringWithFormat:@"CG type-5: %@", r];
     }
-    return [NSString stringWithFormat:@"CG type-5: control did not survive (%@)", ctl];
+    return [NSString stringWithFormat:@"CG type-5: CONTROL FAULTED (%@) - render path broken, not the bug", ctl];
 }
