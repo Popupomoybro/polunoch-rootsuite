@@ -195,6 +195,27 @@ static void ModSweepChain(void) {
     }
 }
 
+// Report what is actually inside the installed bundle, so a stale install is
+// visible in the log instead of being guessed at.
+static void ModReportBundle(void) {
+    NSString *bundle = [NSBundle mainBundle].bundlePath;
+    NSError *err = nil;
+    NSArray *all = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:bundle
+                                                                     error:&err];
+    int fdx = 0, chain = 0, pdfs = 0;
+    for (NSString *f in all) {
+        if (![f hasSuffix:@".pdf"]) continue;
+        pdfs++;
+        if ([f hasPrefix:@"f_dx"]) fdx++;
+        if ([f hasPrefix:@"chaintri_"] || [f hasPrefix:@"chainctl_"]) chain++;
+    }
+    AvePost([NSString stringWithFormat:@"86950 BUNDLE pdfs=%d f_dx=%d chain=%d (chain>0 "
+             @"means the A/B build is installed)", pdfs, fdx, chain]);
+    if (chain == 0)
+        AvePost(@"86950 BUNDLE is STALE: no chain A/B PDFs — the phone runs an older "
+                 @"IPA, reinstall the newest one from the desktop");
+}
+
 NSString *ModCVE86950(void) {
     // The raster-size sweep and the groom only repeat what we already know (the
     // trigger kills the process on the first render), and they burn the whole
@@ -202,6 +223,7 @@ NSString *ModCVE86950(void) {
     //   control -> distance sweep (R86950_START=<index> to jump to any distance).
     AveLog(@"    CVE-2026-86950: ImageIO PDF thumbnail OOB (fixed only in 26.7.1)");
     AvePost(@"86950 start");
+    ModReportBundle();
 
     NSString *ctl = ModThumbPDF(@"control_86950.pdf", @"86950-CTL", 256);
     AvePost([NSString stringWithFormat:@"86950CTL %@", ctl]);
