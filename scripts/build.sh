@@ -13,12 +13,13 @@ mkdir -p "$OUT/Payload/$APP.app/Frameworks"
 clang -isysroot "$SDK" -target arm64-apple-ios15.0 -O1 \
   -framework UIKit -framework Foundation -framework WebKit -framework JavaScriptCore -framework CoreGraphics \
   -framework IOSurface -framework IOKit -framework CoreServices \
-  Sources/main.m Sources/AppDelegate.m Sources/Modules.m Sources/Root.m Sources/WebKitProbes.m Sources/WorseQuery.m Sources/RootPaths.m Sources/RootPaths2.m Sources/LastMile.m Sources/KernelPaths.m Sources/Scribble.m Sources/Unified.m \
+  Sources/main.m Sources/AppDelegate.m Sources/Modules.m Sources/Root.m Sources/WebKitProbes.m Sources/WorseQuery.m Sources/RootPaths.m Sources/RootPaths2.m Sources/LastMile.m Sources/KernelPaths.m Sources/CGShading.m Sources/Scribble.m Sources/Unified.m \
   -o "$OUT/Payload/$APP.app/$APP"
 
 cp Resources/Info.plist        "$OUT/Payload/$APP.app/"
 cp Resources/entitlements.plist "$OUT/Payload/$APP.app/"
 cp Resources/*.js              "$OUT/Payload/$APP.app/"    # the JSC scripts, loaded at run time
+cp Resources/*.pdf             "$OUT/Payload/$APP.app/"    # CG Type-5 shading oracle PDFs (CVE-2026-112611)
 cp Resources/libexports.dylib  "$OUT/Payload/$APP.app/" 2>/dev/null || true
 cp Resources/libclient.dylib   "$OUT/Payload/$APP.app/" 2>/dev/null || true
 cp Resources/Frameworks/libmalformed.dylib "$OUT/Payload/$APP.app/Frameworks/" 2>/dev/null || true

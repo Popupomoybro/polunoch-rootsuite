@@ -1,4 +1,4 @@
-#import <Foundation/Foundation.h>
+﻿#import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <JavaScriptCore/JavaScriptCore.h>
 #import <dlfcn.h>
@@ -35,7 +35,7 @@ NSString *ModJscScribbleRW(void) {
         AvePost(@"SCRIBBLE scribble.js missing from the bundle");
         return @"scribble.js missing from the bundle";
     }
-    NSString *r = RunJSBigStack(src, @"SCRIBBLE", 240);
+    NSString *r = RunJSBigStack(src, @"SCRIBBLE", 900);
     AveLog([NSString stringWithFormat:@"    scribble result: %@", r]);
     AvePost([NSString stringWithFormat:@"SCRIBBLE %@", r]);
     char q = '"';
@@ -47,3 +47,4 @@ NSString *ModJscScribbleRW(void) {
     }
     return r;
 }
+

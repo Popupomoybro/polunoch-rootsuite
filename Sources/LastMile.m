@@ -207,6 +207,7 @@ NSString *RunRootPath(NSString *name) {
     if ([name hasPrefix:@"daemon pivot: writable"])  return ModContainerPivot();
     if ([name hasPrefix:@"daemon pivot: container"]) return ModDaemonPivotWrite();
     if ([name hasPrefix:@"JSC fake-object"])         return ModJscFakeRW();
+    if ([name hasPrefix:@"CG Type-5 shading OOB"])   return ModCGShadingOOB();
     if ([name hasPrefix:@"IOSurfaceRoot selectors"]) return ModIosurfaceRootSelectors();
     if ([name hasPrefix:@"GPU process carrier"])     return ModGpuCarrier();
     return nil;
