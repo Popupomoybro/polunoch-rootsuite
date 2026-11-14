@@ -68,6 +68,7 @@ NSString *ModUnifiedPrimitives(void);
 
 NSString *ModKernelSelectorSweep(void);
 NSString *ModAppGroupDiag(void);
+NSString *ModCGShadingOOB(void);   // CoreGraphics Type-5 shading OOB write (CVE-2026-112611)
 // dispatchers
 NSString *RunModule(NSString *name);
 NSString *RunRootPath(NSString *name);
