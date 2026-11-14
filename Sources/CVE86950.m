@@ -161,6 +161,40 @@ static int ModSweepDistance(void) {
     return 0;
 }
 
+// A/B sweep for the crash cause: chainctl_dNN.pdf is the SAME composite-glyph
+// chain depth with a BENIGN geometry, chaintri_dNN.pdf is the real trigger with
+// the same chain.  If the benign ones also kill the process, the death is the
+// chain exhausting the raster thread's 544 KB stack and NOT our write.
+static void ModSweepChain(void) {
+    NSString *bundle = [NSBundle mainBundle].bundlePath;
+    NSError *err = nil;
+    NSArray *all = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:bundle
+                                                                     error:&err];
+    for (NSString *fam in @[@"chaintri_", @"chainctl_"]) {
+        NSMutableArray *files = [NSMutableArray array];
+        for (NSString *f in all) {
+            if ([f hasPrefix:fam] && [f hasSuffix:@".pdf"]) [files addObject:f];
+        }
+        [files sortUsingSelector:@selector(compare:)];
+        if (!files.count) continue;
+        AvePost([NSString stringWithFormat:@"86950 chain-AB family %@: %d PDFs",
+                 fam, (int)files.count]);
+        for (NSString *f in files) {
+            NSString *tag = [NSString stringWithFormat:@"86950-%@%@",
+                             [fam isEqualToString:@"chainctl_"] ? @"CTL" : @"TRI",
+                             [f substringWithRange:NSMakeRange(fam.length, 3)]];
+            NSString *r = ModThumbPDF(f, tag, 32);
+            AvePost([NSString stringWithFormat:@"86950AB %@ (%@) -> %@", tag, f, r]);
+            if (![r containsString:@"OK"] && ![r containsString:@"NULL"]) {
+                AvePost([NSString stringWithFormat:@"86950AB STOPPED in family %@ on %@",
+                         fam, f]);
+                return;
+            }
+        }
+        AvePost([NSString stringWithFormat:@"86950 chain-AB family %@: all survived", fam]);
+    }
+}
+
 NSString *ModCVE86950(void) {
     // The raster-size sweep and the groom only repeat what we already know (the
     // trigger kills the process on the first render), and they burn the whole
@@ -175,6 +209,7 @@ NSString *ModCVE86950(void) {
         AvePost(@"86950 verdict: CONTROL failed — the thumbnail path is broken, not the bug");
         return [NSString stringWithFormat:@"86950: CONTROL failed (%@)", ctl];
     }
+    ModSweepChain();
     int d = ModSweepDistance();
     if (d > 0)
         return [NSString stringWithFormat:@"86950: the OOB write reached live state at "
