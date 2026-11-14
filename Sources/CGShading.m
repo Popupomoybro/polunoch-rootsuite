@@ -170,6 +170,10 @@ NSString *ModCGShadingOOB(void) {
     ModSweepFamily(@"sht5_r", @"CG-SH");
     ModSweepFamily(@"deep_r", @"CG-Deep");
     ModSweepFamily(@"t4_", @"CG-T4");
+    // newjail's own parameter axes: colorspace x VerticesPerRow x
+    // BitsPerCoordinate x Decode-space, R=136 and value 2.0 (0x4000000000000000,
+    // a mapped-range value rather than a fingerprint).
+    ModSweepFamily(@"njc_", @"CG-NJ");
 
     // ---- site 2: the CMap site (CVE-2026-112610) --------------------------
     NSString *cctl = ModRenderPDF(@"control_cmap.pdf", @"CG-CMapCTL");
