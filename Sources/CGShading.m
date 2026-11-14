@@ -24,6 +24,46 @@
 // still leaves the exact render it died in — that render's parameters are the
 // answer.
 // ===========================================================================
+// Did the page actually PAINT?  A Type-5 shading with /C0=/C1=1.0 on
+// /DeviceGray paints grey, and the CMap oracles draw glyphs.  If the output
+// bitmap stays pure white the shading/text path was never exercised and a clean
+// return proves nothing.  This counts non-white bytes in the rendered bitmap.
+static int ModPaintProbe(NSString *pdfName) {
+    NSString *path = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:pdfName];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return -1;
+    NSData *raw = [NSData dataWithContentsOfFile:path];
+    if (!raw.length) return -1;
+    CGDataProviderRef prov = CGDataProviderCreateWithCFData((CFDataRef)raw);
+    CGPDFDocumentRef doc = CGPDFDocumentCreateWithProvider(prov);
+    CGDataProviderRelease(prov);
+    if (!doc || CGPDFDocumentGetNumberOfPages(doc) < 1) {
+        if (doc) CGPDFDocumentRelease(doc);
+        return -2;
+    }
+    CGPDFPageRef page = CGPDFDocumentGetPage(doc, 1);
+    CGRect box = CGPDFPageGetBoxRect(page, kCGPDFMediaBox);
+    size_t w = (size_t)(CGRectGetWidth(box) + 0.5), h = (size_t)(CGRectGetHeight(box) + 0.5);
+    if (w < 64) w = 64;
+    if (h < 64) h = 64;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, 0, cs,
+                                             kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { CGPDFDocumentRelease(doc); return -3; }
+    CGContextDrawPDFPage(ctx, page);
+    int painted = 0;
+    uint8_t *px = CGBitmapContextGetData(ctx);
+    if (px) {
+        size_t n = w * h * 4;
+        for (size_t i = 0; i < n; i += 4) {
+            if (px[i] < 0xF8 || px[i + 1] < 0xF8 || px[i + 2] < 0xF8) painted++;
+        }
+    }
+    CGContextRelease(ctx);
+    CGPDFDocumentRelease(doc);
+    return painted;
+}
+
 static NSString *ModRenderPDF(NSString *pdfName, NSString *tag) {
     NSString *bundle = [NSBundle mainBundle].bundlePath;
     NSString *path = [bundle stringByAppendingPathComponent:pdfName];
@@ -100,6 +140,21 @@ static NSString *ModSweepFamily(NSString *prefix, NSString *tagPrefix) {
 NSString *ModCGShadingOOB(void) {
     AveLog(@"    CG PDF OOB battery: CVE-2026-112611 (Type-5) + 112610 (CMap)");
     AvePost(@"CG battery start");
+
+    // ---- paint probe: without it a clean return proves nothing ------------
+    int ctlPaint = ModPaintProbe(@"control_shading_type5.pdf");
+    AvePost([NSString stringWithFormat:@"CG paint probe (control shading): %d painted pixels",
+            ctlPaint]);
+    int oraclePaint = ModPaintProbe(@"sht5_r136.pdf");
+    AvePost([NSString stringWithFormat:@"CG paint probe (crash oracle R=136): %d painted pixels",
+            oraclePaint]);
+    int cmapPaint = ModPaintProbe(@"oracle_cmap_csr128.pdf");
+    AvePost([NSString stringWithFormat:@"CG paint probe (CMap csr128): %d painted pixels",
+            cmapPaint]);
+    if (ctlPaint <= 0) {
+        AvePost(@"CG verdict: the control shading painted NOTHING — the Type-5 path is not "
+                 @"being exercised, the sweep results are meaningless");
+    }
 
     // ---- site 1: the Type-5 shading site ----------------------------------
     NSString *ctl = ModRenderPDF(@"control_shading_type5.pdf", @"CG-CTL");
