@@ -41,8 +41,6 @@ static NSString *ModRenderPDF(NSString *pdfName, NSString *tag) {
         return [NSString stringWithFormat:@"%@: not a readable PDF (%@)", tag, pdfName];
     }
     size_t pages = CGPDFDocumentGetNumberOfPages(doc);
-    AveLog([NSString stringWithFormat:@"    %@: pages=%zu, canary BEFORE render of %@",
-           tag, (unsigned long)pages, pdfName]);
 
     CGPDFPageRef page = CGPDFDocumentGetPage(doc, 1);
     CGRect box = CGPDFPageGetBoxRect(page, kCGPDFMediaBox);
@@ -57,7 +55,9 @@ static NSString *ModRenderPDF(NSString *pdfName, NSString *tag) {
         CGPDFDocumentRelease(doc);
         return [NSString stringWithFormat:@"%@: no bitmap context", tag];
     }
-    AveLog([NSString stringWithFormat:@"    %@: canary BEFORE render of %@", tag, pdfName]);
+    AveLog([NSString stringWithFormat:@"    %@: pages=%zu, canary BEFORE render of %@",
+           tag, (unsigned long)pages, pdfName]);
+    AvePost([NSString stringWithFormat:@"%@ BEFORE render of %@", tag, pdfName]);
     CGContextDrawPDFPage(ctx, page);      // <-- the write happens in this call
     CGContextRelease(ctx);
 
