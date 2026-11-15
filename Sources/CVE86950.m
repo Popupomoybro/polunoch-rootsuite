@@ -245,6 +245,37 @@ static void ModSweepK(void) {
     AvePost(@"86950 K-family: every PDF returned without a fault");
 }
 
+// The LEAF family: the crashing font's exact structure (nine-level chain, DX=33
+// and DX=31 straddling the alloca/malloc boundary) with the leaf trigger
+// coordinate swept 500..32000.  lf_dx33_032000 is a byte-for-byte equivalent of
+// the font that actually crashes (only the table-directory offsets differ), so
+// this is both a reproduction check and the distance calibration.
+static void ModSweepLeaf(void) {
+    NSString *bundle = [NSBundle mainBundle].bundlePath;
+    NSError *err = nil;
+    NSArray *all = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:bundle
+                                                                     error:&err];
+    NSMutableArray *fam = [NSMutableArray array];
+    for (NSString *f in all) {
+        if ([f hasPrefix:@"lf_"] && [f hasSuffix:@".pdf"]) [fam addObject:f];
+    }
+    [fam sortUsingSelector:@selector(compare:)];
+    if (!fam.count) return;
+    AvePost([NSString stringWithFormat:@"86950 LEAF family: %d PDFs (DX 31/33 x leaf "
+             @"500..32000, the crashing font's own structure)", (int)fam.count]);
+    for (NSString *f in fam) {
+        NSString *tag = [NSString stringWithFormat:@"86950-L%@",
+                         [f substringWithRange:NSMakeRange(3, 12)]];
+        NSString *r = ModThumbPDF(f, tag, 32);
+        AvePost([NSString stringWithFormat:@"86950LF %@ -> %@", f, r]);
+        if (![r containsString:@"OK"] && ![r containsString:@"NULL"]) {
+            AvePost([NSString stringWithFormat:@"86950 LEAF STOPPED on %@", f]);
+            return;
+        }
+    }
+    AvePost(@"86950 LEAF family: every PDF returned without a fault");
+}
+
 NSString *ModCVE86950(void) {
     // The raster-size sweep and the groom only repeat what we already know (the
     // trigger kills the process on the first render), and they burn the whole
@@ -260,6 +291,7 @@ NSString *ModCVE86950(void) {
         AvePost(@"86950 verdict: CONTROL failed — the thumbnail path is broken, not the bug");
         return [NSString stringWithFormat:@"86950: CONTROL failed (%@)", ctl];
     }
+    ModSweepLeaf();
     ModSweepChain();
     ModSweepK();
     int d = ModSweepDistance();
