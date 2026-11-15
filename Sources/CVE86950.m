@@ -276,6 +276,34 @@ static void ModSweepLeaf(void) {
     AvePost(@"86950 LEAF family: every PDF returned without a fault");
 }
 
+// Repeat the calibrated trigger many times in ONE run.  The crash is layout
+// dependent (the same leaf=8000 PDF killed the process in one run and rendered
+// clean in another), so a single render cannot be calibrated -- a series can.
+// R86950_REPEAT=<n> sets the count (default 40).
+static void ModRepeatCalibrated(void) {
+    NSString *cal = @"lf_dx31_008000.pdf";
+    NSString *calPath = [[NSBundle mainBundle].bundlePath
+                         stringByAppendingPathComponent:cal];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:calPath]) return;
+    int reps = 40;
+    const char *re = getenv("R86950_REPEAT");
+    if (re && *re) reps = atoi(re);
+    if (reps < 1) reps = 1;
+    AvePost([NSString stringWithFormat:@"86950 REPEAT %@ x%d", cal, reps]);
+    int survived = 0;
+    for (int i = 0; i < reps; i++) {
+        NSString *tag = [NSString stringWithFormat:@"86950-R%02d", i];
+        NSString *r = ModThumbPDF(cal, tag, 32);
+        survived++;
+        if (![r containsString:@"OK"] && ![r containsString:@"NULL"]) {
+            AvePost([NSString stringWithFormat:@"86950 REPEAT STOPPED after %d survivors",
+                     survived - 1]);
+            return;
+        }
+    }
+    AvePost([NSString stringWithFormat:@"86950 REPEAT: all %d renders survived", reps]);
+}
+
 NSString *ModCVE86950(void) {
     // The raster-size sweep and the groom only repeat what we already know (the
     // trigger kills the process on the first render), and they burn the whole
@@ -284,6 +312,7 @@ NSString *ModCVE86950(void) {
     AveLog(@"    CVE-2026-86950: ImageIO PDF thumbnail OOB (fixed only in 26.7.1)");
     AvePost(@"86950 start");
     ModReportBundle();
+    ModRepeatCalibrated();
 
     NSString *ctl = ModThumbPDF(@"control_86950.pdf", @"86950-CTL", 256);
     AvePost([NSString stringWithFormat:@"86950CTL %@", ctl]);
