@@ -133,16 +133,22 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
             uint32_t mark = (uint32_t)(0xC000 + ids[i]);
             want0 = ((uint64_t)mark << 16) | mark;   // the +2048/+2050 pair
         }
+        // the marker lives at +2048 (two u16 at +2048/+2050), NOT at +0: the earlier
+        // build compared want0 at offset 0, so every detector mismatched there
+        // AND at +2048 and the run reported a false "HEAP CORRUPTION CONFIRMED".
+        // The log evidence was in the output itself: the "block @+0x800" lines
+        // showed the markers intact (c000c000) while the "detector" lines showed
+        // a FILL word. Now the marker is checked where it was written.
         for (size_t off = 0; off + 8 <= sz; off += 8) {
-            uint64_t want = (off == 0) ? want0 : FILL;
+            uint64_t want = ((ids[i] >= 0) && off == 2048) ? want0 : FILL;
             if (q[off / 8] != want) {
                 uint64_t got = q[off / 8];
-                if (ids[i] >= 0 && off == 0) {
+                if (ids[i] >= 0 && off == 2048) {
                     AvePost([NSString stringWithFormat:@"86950 CORRUPTION detector "
-                             @"obj=%d marker %04x/%04x -> %04x/%04x (+%zu): a live "
-                             @"16-bit += inside OUR carpet", ids[i],
+                             @"obj=%d (+%zu) marker %04x/%04x -> %04x/%04x: a live "
+                             @"16-bit += inside OUR carpet", ids[i], sz,
                              0xC000 + ids[i], 0xC000 + ids[i],
-                             (unsigned)(got & 0xffff), (unsigned)(got >> 16), sz]);
+                             (unsigned)(got & 0xffff), (unsigned)(got >> 16)]);
                 } else {
                     AvePost([NSString stringWithFormat:@"86950 CORRUPTION block %d (+%zu) "
                              @"@+%#zx = %#llx", i, sz, off, got]);
