@@ -115,6 +115,7 @@ static UIColor *DANGER(void) { return [UIColor colorWithRed:1.000 green:0.271 bl
 static UITextView *g_log = nil;
 static UILabel *g_status = nil;
 static UILabel *g_rootPill = nil;
+static UIViewController *g_mainVC = nil;
 static NSString *const kEndpoint = @"http://192.168.1.125:8098/log";
 
 void AveLog(NSString *s) {
@@ -133,6 +134,11 @@ void AveSetStatus(NSString *s) {
 void AveSleep(int ms) { [NSThread sleepForTimeInterval:(double)ms / 1000.0]; }
 
 void AvePost(NSString *s) {
+    if (!s) s = @"";
+    // THE PHONE IS THE PRIMARY LOG: every diagnostic line lands in the on-device
+    // log first (the PC server is an optional mirror), so a run never depends on
+    // the machine being awake.  The POST itself stays best-effort.
+    AveLog(s);
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:kEndpoint]];
     req.HTTPMethod = @"POST"; req.timeoutInterval = 6;
     req.HTTPBody = [[NSString stringWithFormat:@"ROOTSUITE %@", s ?: @""] dataUsingEncoding:NSUTF8StringEncoding];
@@ -247,6 +253,121 @@ static void refreshRootPill(void) {
 }
 @end
 
+// MARK: - full-screen log window (the phone is the primary display)
+@interface RSTextVC : UIViewController
+@property (nonatomic, copy) void (^textProvider)(void);
+@property (nonatomic, strong) NSTimer *follow;
+@end
+
+@implementation RSTextVC
+
+- (void)loadView {
+    UITextView *tv = [UITextView new];
+    tv.editable = NO; tv.selectable = YES;
+    tv.backgroundColor = [UIColor blackColor];
+    tv.textColor = ACCENT();
+    tv.font = [UIFont fontWithName:@"Menlo" size:10];
+    tv.textContainerInset = UIEdgeInsetsMake(8, 8, 8, 8);
+    tv.alwaysBounceVertical = YES;
+    self.view = tv;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.view.backgroundColor = BG();
+    UILayoutGuide *g = self.view.safeAreaLayoutGuide;
+
+    UILabel *title = [UILabel new]; title.translatesAutoresizingMaskIntoConstraints = NO;
+    title.attributedText = [[NSAttributedString alloc] initWithString:@"LOG"
+                                                           attributes:@{NSKernAttributeName : @2.2,
+                                                                        NSFontAttributeName : [UIFont systemFontOfSize:13 weight:UIFontWeightHeavy]}];
+    title.textColor = TEXT();
+
+    UIButton *x = [UIButton buttonWithType:UIButtonTypeSystem];
+    x.translatesAutoresizingMaskIntoConstraints = NO;
+    [x setTitle:@"Close" forState:UIControlStateNormal];
+    x.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    [x setTitleColor:SUB() forState:UIControlStateNormal];
+    x.backgroundColor = CARD(); x.layer.cornerRadius = 14; x.clipsToBounds = YES;
+    [x addTarget:self action:@selector(close:) forControlEvents:UIControlEventTouchUpInside];
+
+    UIButton *sh = [UIButton buttonWithType:UIButtonTypeSystem];
+    sh.translatesAutoresizingMaskIntoConstraints = NO;
+    [sh setTitle:@"Share" forState:UIControlStateNormal];
+    sh.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightBold];
+    [sh setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
+    sh.backgroundColor = ACCENT(); sh.layer.cornerRadius = 14; sh.clipsToBounds = YES;
+    [sh addTarget:self action:@selector(share:) forControlEvents:UIControlEventTouchUpInside];
+
+    UIButton *cp = [UIButton buttonWithType:UIButtonTypeSystem];
+    cp.translatesAutoresizingMaskIntoConstraints = NO;
+    [cp setTitle:@"Copy" forState:UIControlStateNormal];
+    cp.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+    [cp setTitleColor:TEXT() forState:UIControlStateNormal];
+    cp.backgroundColor = CARD(); cp.layer.cornerRadius = 14; cp.clipsToBounds = YES;
+    [cp addTarget:self action:@selector(copyAll:) forControlEvents:UIControlEventTouchUpInside];
+
+    [self.view addSubview:title]; [self.view addSubview:x];
+    [self.view addSubview:sh]; [self.view addSubview:cp];
+    [NSLayoutConstraint activateConstraints:@[
+        [title.centerYAnchor constraintEqualToAnchor:x.centerYAnchor],
+        [x.topAnchor constraintEqualToAnchor:g.topAnchor constant:6],
+        [x.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
+        [x.widthAnchor constraintEqualToConstant:66], [x.heightAnchor constraintEqualToConstant:28],
+        [cp.topAnchor constraintEqualToAnchor:g.topAnchor constant:6],
+        [cp.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
+        [cp.widthAnchor constraintEqualToConstant:66], [cp.heightAnchor constraintEqualToConstant:28],
+        [sh.topAnchor constraintEqualToAnchor:g.topAnchor constant:6],
+        [sh.trailingAnchor constraintEqualToAnchor:cp.leadingAnchor constant:-8],
+        [sh.widthAnchor constraintEqualToConstant:78], [sh.heightAnchor constraintEqualToConstant:28],
+    ]];
+    // inset the text under the toolbar
+    ((UITextView *)self.view).textContainerInset = UIEdgeInsetsMake(40, 8, 16, 8);
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (self.textProvider) self.textProvider();
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    // follow the live tail while the window is open
+    self.follow = [NSTimer scheduledTimerWithTimeInterval:0.7 target:self
+                                                 selector:@selector(refresh) userInfo:nil repeats:YES];
+    [self refresh];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self.follow invalidate]; self.follow = nil;
+}
+
+- (void)refresh {
+    UITextView *tv = (UITextView *)self.view;
+    BOOL atEnd = (tv.contentOffset.y >= tv.contentSize.height - tv.bounds.size.height - 40);
+    tv.text = g_log ? g_log.text : @"";
+    if (atEnd) [tv scrollRangeToVisible:NSMakeRange(tv.text.length - 1, 1)];
+}
+
+- (void)share:(id)sender {
+    NSString *text = g_log ? g_log.text : @"";
+    if (!text.length) text = @"(the log is empty - no module has run yet)";
+    UIActivityViewController *av = [[UIActivityViewController alloc]
+        initWithActivityItems:@[text] applicationActivities:nil];
+    av.popoverPresentationController.sourceView = self.view;
+    [self presentViewController:av animated:YES completion:nil];
+}
+
+- (void)copyAll:(id)sender {
+    UIPasteboard.generalPasteboard.string = g_log ? g_log.text : @"";
+}
+
+- (void)close:(id)sender {
+    [self dismissViewControllerAnimated:YES completion:nil];
+}
+@end
+
 // MARK: - AppDelegate
 @interface AppDelegate () <UITableViewDataSource, UITableViewDelegate>
 @end
@@ -279,6 +400,17 @@ static void refreshRootPill(void) {
     g_rootPill.textAlignment = NSTextAlignmentCenter;
     g_rootPill.layer.cornerRadius = 13; g_rootPill.clipsToBounds = YES;
     g_rootPill.layer.borderWidth = 0.5; g_rootPill.layer.borderColor = HAIR().CGColor;
+
+    // top-right log button (Dopamine's settings-corner position): the phone is
+    // the primary display, so the full log and its Share live on the device.
+    UIButton *logBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    logBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [logBtn setTitle:@"LOG" forState:UIControlStateNormal];
+    logBtn.titleLabel.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightBold];
+    [logBtn setTitleColor:SUB() forState:UIControlStateNormal];
+    logBtn.backgroundColor = CARD(); logBtn.layer.cornerRadius = 7;
+    logBtn.layer.borderColor = HAIR().CGColor; logBtn.layer.borderWidth = 0.5;
+    [logBtn addTarget:self action:@selector(showLog:) forControlEvents:UIControlEventTouchUpInside];
 
     self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     self.table.translatesAutoresizingMaskIntoConstraints = NO;
@@ -343,7 +475,7 @@ static void refreshRootPill(void) {
 
     g_log = [UITextView new]; g_log.translatesAutoresizingMaskIntoConstraints = NO;
     g_log.backgroundColor = [UIColor blackColor]; g_log.textColor = ACCENT();
-    g_log.font = [UIFont fontWithName:@"Menlo" size:9.5]; g_log.editable = NO;
+    g_log.font = [UIFont fontWithName:@"Menlo" size:9.5]; g_log.editable = NO; g_log.selectable = YES;
     g_log.textContainerInset = UIEdgeInsetsMake(6, 8, 6, 8);
     g_log.layer.cornerRadius = 10; g_log.layer.borderColor = HAIR().CGColor; g_log.layer.borderWidth = 0.5;
     g_log.text = @"";
@@ -355,11 +487,16 @@ static void refreshRootPill(void) {
 
     [vc.view addSubview:logo]; [vc.view addSubview:self.titleLabel]; [vc.view addSubview:self.subtitleLabel];
     [vc.view addSubview:g_rootPill]; [vc.view addSubview:self.runButton];
+    [vc.view addSubview:logBtn];
     [vc.view addSubview:self.table]; [vc.view addSubview:self.allButton];
     [vc.view addSubview:sileo]; [vc.view addSubview:term];
     [vc.view addSubview:g_status]; [vc.view addSubview:g_log]; [vc.view addSubview:credit];
+    g_mainVC = vc;
 
     [NSLayoutConstraint activateConstraints:@[
+        [logBtn.topAnchor constraintEqualToAnchor:g.topAnchor constant:10],
+        [logBtn.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
+        [logBtn.widthAnchor constraintEqualToConstant:52], [logBtn.heightAnchor constraintEqualToConstant:26],
         [logo.topAnchor constraintEqualToAnchor:g.topAnchor constant:4],
         [logo.centerXAnchor constraintEqualToAnchor:vc.view.centerXAnchor],
         [logo.widthAnchor constraintEqualToConstant:76], [logo.heightAnchor constraintEqualToConstant:76],
@@ -510,6 +647,14 @@ static void refreshRootPill(void) {
         }
     }
     return YES;
+}
+
+- (void)showLog:(UIButton *)sender {
+    if (!g_mainVC.presentedViewController) {
+        RSTextVC *lv = [[RSTextVC alloc] init];
+        lv.modalPresentationStyle = UIModalPresentationPageSheet;
+        [g_mainVC presentViewController:lv animated:YES completion:nil];
+    }
 }
 
 - (void)updateRunTitle {
