@@ -123,6 +123,7 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
     AvePost([NSString stringWithFormat:@"86950 carpet-render: %@", r]);
 
     int corrupt = 0;
+    int printed = 0;
     for (int i = 0; i < n; i++) {
         void *p = ptrs[i];
         size_t sz = szl[i];
@@ -139,31 +140,30 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
         // The log evidence was in the output itself: the "block @+0x800" lines
         // showed the markers intact (c000c000) while the "detector" lines showed
         // a FILL word. Now the marker is checked where it was written.
-        for (size_t off = 0; off + 8 <= sz; off += 8) {
+        // full scan of EVERY block, no early cutoff: the first fixed-offset run stopped
+    // at the >16 cutoff, so only the first 17 detectors were ever measured and
+    // the shape of the hit (which u16 inside the word, and how many blocks) was
+    // invisible.  Print got AND want verbatim, up to 24 lines, then the total.
+    for (size_t off = 0; off + 8 <= sz; off += 8) {
             uint64_t want = ((ids[i] >= 0) && off == 2048) ? want0 : FILL;
             if (q[off / 8] != want) {
-                uint64_t got = q[off / 8];
-                if (ids[i] >= 0 && off == 2048) {
-                    AvePost([NSString stringWithFormat:@"86950 CORRUPTION detector "
-                             @"obj=%d (+%zu) marker %04x/%04x -> %04x/%04x: a live "
-                             @"16-bit += inside OUR carpet", ids[i], sz,
-                             0xC000 + ids[i], 0xC000 + ids[i],
-                             (unsigned)(got & 0xffff), (unsigned)(got >> 16)]);
-                } else {
-                    AvePost([NSString stringWithFormat:@"86950 CORRUPTION block %d (+%zu) "
-                             @"@+%#zx = %#llx", i, sz, off, got]);
-                }
                 corrupt++;
-                if (corrupt > 16) break;
+                if (printed < 24) {
+                    printed++;
+                    AvePost([NSString stringWithFormat:@"86950 CORRUPTION block %d "
+                             @"(+%zu) @+%#zx = %#018llx want %#018llx id=%d",
+                             i, sz, off, (unsigned long long)q[off / 8],
+                             (unsigned long long)want, ids[i]]);
+                }
             }
         }
         free(p);
-        if (corrupt > 16) break;
     }
     free(ptrs);
     free(szl);
     free(ids);
-    AvePost([NSString stringWithFormat:@"86950 carpet scan: %d corrupted words", corrupt]);
+    AvePost([NSString stringWithFormat:@"86950 carpet scan: %d corrupted words (%d "
+             @"printed) over the whole carpet (%d blocks)", corrupt, printed, n]);
     return corrupt;
 }
 
