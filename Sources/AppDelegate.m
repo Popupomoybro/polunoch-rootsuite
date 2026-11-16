@@ -4,16 +4,113 @@
 #import "Modules.h"
 #import "Root.h"
 
-// MARK: - palette
-static UIColor *BG(void)     { return [UIColor colorWithRed:0.043 green:0.043 blue:0.059 alpha:1]; }
-static UIColor *CARD(void)   { return [UIColor colorWithRed:0.085 green:0.085 blue:0.106 alpha:1]; }
-static UIColor *HAIR(void)   { return [UIColor colorWithRed:0.149 green:0.149 blue:0.180 alpha:1]; }
-static UIColor *TEXT(void)   { return [UIColor colorWithRed:0.949 green:0.949 blue:0.969 alpha:1]; }
-static UIColor *SUB(void)    { return [UIColor colorWithRed:0.557 green:0.557 blue:0.576 alpha:1]; }
+// MARK: - palette (Dopamine-style: true black, one accent, hairlines)
+static UIColor *BG(void)     { return [UIColor blackColor]; }
+static UIColor *CARD(void)   { return [UIColor colorWithRed:0.070 green:0.075 blue:0.086 alpha:1]; }
+static UIColor *HAIR(void)   { return [UIColor colorWithRed:0.145 green:0.153 blue:0.176 alpha:1]; }
+static UIColor *TEXT(void)   { return [UIColor colorWithRed:0.961 green:0.965 blue:0.980 alpha:1]; }
+static UIColor *SUB(void)    { return [UIColor colorWithRed:0.541 green:0.557 blue:0.600 alpha:1]; }
 static UIColor *ACCENT(void) { return [UIColor colorWithRed:0.188 green:0.820 blue:0.345 alpha:1]; }
+static UIColor *ACCENT2(void){ return [UIColor colorWithRed:0.239 green:0.898 blue:0.702 alpha:1]; }
 static UIColor *WARN(void)   { return [UIColor colorWithRed:1.000 green:0.624 blue:0.039 alpha:1]; }
 static UIColor *INFO(void)   { return [UIColor colorWithRed:0.392 green:0.824 blue:1.000 alpha:1]; }
 static UIColor *DANGER(void) { return [UIColor colorWithRed:1.000 green:0.271 blue:0.341 alpha:1]; }
+
+// MARK: - RootSuite logo: the "hex root core" — a hexagon ring (the molecular
+// nod), a descending root tree and a pulsing core node, drawn with layers so
+// the ring can turn and the glow can breathe.
+@interface RSLogoView : UIView
+@end
+
+@implementation RSLogoView
+
++ (CAShapeLayer *)ringLayerInRect:(CGRect)r {
+    CAShapeLayer *hex = [CAShapeLayer layer];
+    UIBezierPath *p = [UIBezierPath bezierPath];
+    CGFloat cx = CGRectGetMidX(r), cy = CGRectGetMidY(r), rad = MIN(r.size.width, r.size.height) / 2.0;
+    for (int i = 0; i < 6; i++) {
+        CGFloat a = (CGFloat)(M_PI_2 + i * M_PI / 3.0);
+        CGPoint pt = CGPointMake(cx + rad * cosf(a), cy + rad * sinf(a));
+        if (i == 0) [p moveToPoint:pt]; else [p addLineToPoint:pt];
+    }
+    [p closePath];
+    hex.path = p.CGPath;
+    hex.fillColor = NULL;
+    hex.strokeColor = TEXT().CGColor;
+    hex.lineWidth = 2.0;
+    hex.lineJoin = kCALineJoinRound;
+    return hex;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        CGRect r = CGRectInset(self.bounds, 7, 7);
+        // root tree under the ring
+        CAShapeLayer *roots = [CAShapeLayer layer];
+        UIBezierPath *rp = [UIBezierPath bezierPath];
+        CGFloat cx = CGRectGetMidX(r), cy = CGRectGetMidY(r);
+        [rp moveToPoint:CGPointMake(cx, cy - 4)];
+        [rp addLineToPoint:CGPointMake(cx, cy + 16)];                       // taproot
+        for (int i = 0; i < 3; i++) {
+            CGFloat dx = (i + 1) * 7.0;
+            [rp moveToPoint:CGPointMake(cx, cy + 4 + i * 5)];
+            [rp addCurveToPoint:CGPointMake(cx - dx, cy + 16 + i * 4)
+                   controlPoint1:CGPointMake(cx - dx * 0.4, cy + 8 + i * 5)
+                   controlPoint2:CGPointMake(cx - dx * 0.7, cy + 12 + i * 5)];
+            [rp moveToPoint:CGPointMake(cx, cy + 4 + i * 5)];
+            [rp addCurveToPoint:CGPointMake(cx + dx, cy + 16 + i * 4)
+                   controlPoint1:CGPointMake(cx + dx * 0.4, cy + 8 + i * 5)
+                   controlPoint2:CGPointMake(cx + dx * 0.7, cy + 12 + i * 5)];
+        }
+        roots.path = rp.CGPath;
+        roots.fillColor = NULL;
+        roots.strokeColor = ACCENT().CGColor;
+        roots.lineWidth = 2.2;
+        roots.lineCap = kCALineCapRound;
+        [self.layer addSublayer:roots];
+
+        // the ring, gradient-stroked through a mask
+        CAShapeLayer *hex = [[self class] ringLayerInRect:r];
+        CAGradientLayer *grad = [CAGradientLayer layer];
+        grad.frame = self.bounds;
+        grad.colors = @[(id)ACCENT().CGColor, (id)ACCENT2().CGColor, (id)INFO().CGColor];
+        grad.startPoint = CGPointMake(0, 0); grad.endPoint = CGPointMake(1, 1);
+        grad.mask = hex;
+        [self.layer addSublayer:grad];
+
+        // the core node
+        CALayer *core = [CALayer layer];
+        CGFloat csz = 10;
+        core.frame = CGRectMake(cx - csz / 2, cy - csz / 2 - 1, csz, csz);
+        core.backgroundColor = ACCENT2().CGColor;
+        core.cornerRadius = csz / 2;
+        core.shadowColor = ACCENT2().CGColor;
+        core.shadowRadius = 8; core.shadowOpacity = 1; core.shadowOffset = CGSizeZero;
+        [self.layer addSublayer:core];
+
+        // breathing glow behind the core
+        CAShapeLayer *glow = [CAShapeLayer layer];
+        glow.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(r, 8, 8)].CGPath;
+        glow.fillColor = NULL; glow.strokeColor = TEXT().CGColor; glow.lineWidth = 0.8;
+        glow.shadowColor = ACCENT2().CGColor; glow.shadowRadius = 12;
+        glow.shadowOpacity = 0.9; glow.shadowOffset = CGSizeZero;
+        [self.layer addSublayer:glow];
+
+        CABasicAnimation *breathe = [CABasicAnimation animationWithKeyPath:@"opacity"];
+        breathe.fromValue = @0.25; breathe.toValue = @1.0;
+        breathe.duration = 1.8; breathe.autoreverses = YES; breathe.repeatCount = HUGE_VALF;
+        breathe.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [glow addAnimation:breathe forKey:@"breathe"];
+
+        CABasicAnimation *turn = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+        turn.fromValue = @0; turn.toValue = @(2 * M_PI);
+        turn.duration = 14.0; turn.repeatCount = HUGE_VALF;
+        [grad addAnimation:turn forKey:@"turn"];
+    }
+    return self;
+}
+@end
 
 static UITextView *g_log = nil;
 static UILabel *g_status = nil;
@@ -64,6 +161,7 @@ static void refreshRootPill(void) {
 
 // MARK: - module cell
 @interface ModuleCell : UITableViewCell
+@property (nonatomic, strong) UIView *card;
 @property (nonatomic, strong) UILabel *pill, *name, *desc;
 @property (nonatomic, strong) UIImageView *tick;
 @end
@@ -77,9 +175,10 @@ static void refreshRootPill(void) {
         UIView *card = [UIView new];
         card.translatesAutoresizingMaskIntoConstraints = NO;
         card.backgroundColor = CARD();
-        card.layer.cornerRadius = 14;
+        card.layer.cornerRadius = 16;
         card.layer.borderColor = HAIR().CGColor; card.layer.borderWidth = 0.5;
         [self.contentView addSubview:card];
+        self.card = card;
         self.pill = [UILabel new]; self.pill.translatesAutoresizingMaskIntoConstraints = NO;
         self.pill.font = [UIFont monospacedSystemFontOfSize:8 weight:UIFontWeightBold];
         self.pill.textAlignment = NSTextAlignmentCenter;
@@ -116,6 +215,12 @@ static void refreshRootPill(void) {
     return self;
 }
 - (void)configure:(NSDictionary *)m selected:(BOOL)sel {
+    self.card.layer.borderColor = (sel ? ACCENT() : HAIR()).CGColor;
+    self.card.layer.borderWidth = sel ? 1.0 : 0.5;
+    self.card.layer.shadowColor = sel ? ACCENT().CGColor : NULL;
+    self.card.layer.shadowRadius = sel ? 9 : 0;
+    self.card.layer.shadowOpacity = sel ? 0.35 : 0;
+    self.card.layer.shadowOffset = CGSizeZero;
     NSString *st = m[@"status"];
     self.pill.text = st;
     UIColor *col = [st isEqualToString:@"PROVEN"] ? ACCENT() : [st isEqualToString:@"MEASURED"] ? INFO()
@@ -131,7 +236,9 @@ static void refreshRootPill(void) {
     CGContextSetLineWidth(c, 1.4);
     CGContextAddEllipseInRect(c, r); CGContextStrokePath(c);
     if (sel) {
-        CGContextSetStrokeColorWithColor(c, ACCENT().CGColor); CGContextSetLineWidth(c, 2.0);
+        CGContextSetFillColorWithColor(c, ACCENT().CGColor);
+        CGContextFillEllipseInRect(c, r);
+        CGContextSetStrokeColorWithColor(c, [UIColor blackColor].CGColor); CGContextSetLineWidth(c, 2.0);
         CGContextMoveToPoint(c, 7, 11.5); CGContextAddLineToPoint(c, 10.2, 14.6); CGContextAddLineToPoint(c, 15.2, 7.8);
         CGContextStrokePath(c);
     }
@@ -153,22 +260,25 @@ static void refreshRootPill(void) {
     UILayoutGuide *g = vc.view.safeAreaLayoutGuide;
     CGFloat w = self.window.bounds.size.width;
 
+    // hero: logo, wordmark, device line, root pill (Dopamine-style stack)
+    RSLogoView *logo = [[RSLogoView alloc] initWithFrame:CGRectMake(0, 0, 76, 76)];
+    logo.translatesAutoresizingMaskIntoConstraints = NO;
+    logo.userInteractionEnabled = NO;
+
     self.titleLabel = [UILabel new]; self.titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.titleLabel.text = @"RootSuite";
-    self.titleLabel.font = [UIFont systemFontOfSize:26 weight:UIFontWeightHeavy];
+    NSDictionary *kern = @{NSKernAttributeName : @2.8, NSFontAttributeName : [UIFont systemFontOfSize:23 weight:UIFontWeightHeavy]};
+    self.titleLabel.attributedText = [[NSAttributedString alloc] initWithString:@"ROOTSUITE" attributes:kern];
     self.titleLabel.textColor = TEXT();
 
     self.subtitleLabel = [UILabel new]; self.subtitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    self.subtitleLabel.text = @"26.2 beta 1 / 23C5027f / arm64e - every root path";
+    self.subtitleLabel.text = @"iOS 26.2 beta 1 / 23C5027f / iPhone13,1 / arm64e";
     self.subtitleLabel.font = [UIFont systemFontOfSize:11]; self.subtitleLabel.textColor = SUB();
 
     g_rootPill = [UILabel new]; g_rootPill.translatesAutoresizingMaskIntoConstraints = NO;
-    g_rootPill.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightBold];
+    g_rootPill.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightBold];
     g_rootPill.textAlignment = NSTextAlignmentCenter;
-    g_rootPill.layer.cornerRadius = 12; g_rootPill.clipsToBounds = YES;
+    g_rootPill.layer.cornerRadius = 13; g_rootPill.clipsToBounds = YES;
     g_rootPill.layer.borderWidth = 0.5; g_rootPill.layer.borderColor = HAIR().CGColor;
-
-    UIView *div = [UIView new]; div.translatesAutoresizingMaskIntoConstraints = NO; div.backgroundColor = HAIR();
 
     self.table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     self.table.translatesAutoresizingMaskIntoConstraints = NO;
@@ -189,12 +299,21 @@ static void refreshRootPill(void) {
     self.allButton.layer.borderColor = HAIR().CGColor; self.allButton.layer.borderWidth = 0.5;
     [self.allButton addTarget:self action:@selector(toggleAll) forControlEvents:UIControlEventTouchUpInside];
 
+    // the big one: gradient pill with a glow, like Dopamine's action button
     self.runButton = [UIButton buttonWithType:UIButtonTypeSystem];
     self.runButton.translatesAutoresizingMaskIntoConstraints = NO;
-    self.runButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
-    [self.runButton setTitle:@">>  Run" forState:UIControlStateNormal];
+    [self.runButton setTitle:@"Run selected" forState:UIControlStateNormal];
+    self.runButton.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightBold];
     [self.runButton setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
-    self.runButton.backgroundColor = ACCENT(); self.runButton.layer.cornerRadius = 10;
+    self.runButton.layer.cornerRadius = 26; self.runButton.clipsToBounds = NO;
+    CAGradientLayer *runGrad = [CAGradientLayer layer];
+    runGrad.colors = @[(id)ACCENT().CGColor, (id)ACCENT2().CGColor];
+    runGrad.startPoint = CGPointMake(0, 0.5); runGrad.endPoint = CGPointMake(1, 0.5);
+    runGrad.cornerRadius = 26;
+    [self.runButton.layer insertSublayer:runGrad atIndex:0];
+    self.runButton.layer.shadowColor = ACCENT().CGColor;
+    self.runButton.layer.shadowRadius = 16; self.runButton.layer.shadowOpacity = 0.45;
+    self.runButton.layer.shadowOffset = CGSizeZero;
     [self.runButton addTarget:self action:@selector(run) forControlEvents:UIControlEventTouchUpInside];
 
     UIButton *sileo = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -229,51 +348,64 @@ static void refreshRootPill(void) {
     g_log.layer.cornerRadius = 10; g_log.layer.borderColor = HAIR().CGColor; g_log.layer.borderWidth = 0.5;
     g_log.text = @"";
 
-    [vc.view addSubview:self.titleLabel]; [vc.view addSubview:self.subtitleLabel];
-    [vc.view addSubview:g_rootPill]; [vc.view addSubview:div];
+    UILabel *credit = [UILabel new]; credit.translatesAutoresizingMaskIntoConstraints = NO;
+    credit.text = @"Sideloadly signed • team 5G33ZSZ4G5 • every module offline-measured";
+    credit.font = [UIFont systemFontOfSize:9]; credit.textColor = SUB();
+    credit.textAlignment = NSTextAlignmentCenter;
+
+    [vc.view addSubview:logo]; [vc.view addSubview:self.titleLabel]; [vc.view addSubview:self.subtitleLabel];
+    [vc.view addSubview:g_rootPill]; [vc.view addSubview:self.runButton];
     [vc.view addSubview:self.table]; [vc.view addSubview:self.allButton];
-    [vc.view addSubview:self.runButton]; [vc.view addSubview:sileo];
-    [vc.view addSubview:term]; [vc.view addSubview:g_status]; [vc.view addSubview:g_log];
+    [vc.view addSubview:sileo]; [vc.view addSubview:term];
+    [vc.view addSubview:g_status]; [vc.view addSubview:g_log]; [vc.view addSubview:credit];
 
     [NSLayoutConstraint activateConstraints:@[
-        [self.titleLabel.topAnchor constraintEqualToAnchor:g.topAnchor constant:6],
-        [self.titleLabel.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
-        [self.subtitleLabel.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:1],
-        [self.subtitleLabel.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
-        [g_rootPill.centerYAnchor constraintEqualToAnchor:self.titleLabel.centerYAnchor],
-        [g_rootPill.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
-        [g_rootPill.widthAnchor constraintEqualToConstant:96], [g_rootPill.heightAnchor constraintEqualToConstant:26],
-        [div.topAnchor constraintEqualToAnchor:self.subtitleLabel.bottomAnchor constant:8],
-        [div.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
-        [div.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
-        [div.heightAnchor constraintEqualToConstant:0.5],
-        [self.table.topAnchor constraintEqualToAnchor:div.bottomAnchor constant:6],
+        [logo.topAnchor constraintEqualToAnchor:g.topAnchor constant:4],
+        [logo.centerXAnchor constraintEqualToAnchor:vc.view.centerXAnchor],
+        [logo.widthAnchor constraintEqualToConstant:76], [logo.heightAnchor constraintEqualToConstant:76],
+        [self.titleLabel.topAnchor constraintEqualToAnchor:logo.bottomAnchor constant:2],
+        [self.titleLabel.centerXAnchor constraintEqualToAnchor:vc.view.centerXAnchor],
+        [self.subtitleLabel.topAnchor constraintEqualToAnchor:self.titleLabel.bottomAnchor constant:2],
+        [self.subtitleLabel.centerXAnchor constraintEqualToAnchor:vc.view.centerXAnchor],
+        [g_rootPill.topAnchor constraintEqualToAnchor:self.subtitleLabel.bottomAnchor constant:10],
+        [g_rootPill.centerXAnchor constraintEqualToAnchor:vc.view.centerXAnchor],
+        [g_rootPill.widthAnchor constraintEqualToConstant:188], [g_rootPill.heightAnchor constraintEqualToConstant:26],
+        [self.runButton.topAnchor constraintEqualToAnchor:g_rootPill.bottomAnchor constant:10],
+        [self.runButton.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
+        [self.runButton.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
+        [self.runButton.heightAnchor constraintEqualToConstant:52],
+        [self.table.topAnchor constraintEqualToAnchor:self.runButton.bottomAnchor constant:10],
         [self.table.leadingAnchor constraintEqualToAnchor:g.leadingAnchor],
         [self.table.trailingAnchor constraintEqualToAnchor:g.trailingAnchor],
-        [self.table.heightAnchor constraintEqualToConstant:252],
-        [self.allButton.topAnchor constraintEqualToAnchor:self.table.bottomAnchor constant:7],
+        [self.table.heightAnchor constraintEqualToConstant:238],
+        [self.allButton.topAnchor constraintEqualToAnchor:self.table.bottomAnchor constant:8],
         [self.allButton.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
-        [self.allButton.heightAnchor constraintEqualToConstant:36], [self.allButton.widthAnchor constraintEqualToConstant:52],
-        [self.runButton.topAnchor constraintEqualToAnchor:self.table.bottomAnchor constant:7],
-        [self.runButton.leadingAnchor constraintEqualToAnchor:self.allButton.trailingAnchor constant:6],
-        [self.runButton.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
-        [self.runButton.heightAnchor constraintEqualToConstant:36],
-        [sileo.topAnchor constraintEqualToAnchor:self.runButton.bottomAnchor constant:7],
-        [sileo.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
+        [self.allButton.heightAnchor constraintEqualToConstant:34], [self.allButton.widthAnchor constraintEqualToConstant:52],
+        [sileo.topAnchor constraintEqualToAnchor:self.table.bottomAnchor constant:8],
+        [sileo.leadingAnchor constraintEqualToAnchor:self.allButton.trailingAnchor constant:6],
         [sileo.trailingAnchor constraintEqualToAnchor:vc.view.centerXAnchor constant:-3],
-        [sileo.heightAnchor constraintEqualToConstant:36],
-        [term.topAnchor constraintEqualToAnchor:sileo.topAnchor],
+        [sileo.heightAnchor constraintEqualToConstant:34],
+        [term.topAnchor constraintEqualToAnchor:self.table.bottomAnchor constant:8],
         [term.leadingAnchor constraintEqualToAnchor:vc.view.centerXAnchor constant:3],
         [term.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
-        [term.heightAnchor constraintEqualToConstant:36],
-        [g_status.topAnchor constraintEqualToAnchor:sileo.bottomAnchor constant:5],
+        [term.heightAnchor constraintEqualToConstant:34],
+        [g_status.topAnchor constraintEqualToAnchor:sileo.bottomAnchor constant:6],
         [g_status.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
         [g_status.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
         [g_log.topAnchor constraintEqualToAnchor:g_status.bottomAnchor constant:5],
         [g_log.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
         [g_log.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
-        [g_log.bottomAnchor constraintEqualToAnchor:g.bottomAnchor constant:-6],
+        [credit.topAnchor constraintEqualToAnchor:g_log.bottomAnchor constant:5],
+        [credit.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
+        [credit.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
+        [credit.bottomAnchor constraintEqualToAnchor:g.bottomAnchor constant:-4],
     ]];
+
+    // the gradient layer has no frame until after the first layout pass
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (CALayer *l in self.runButton.layer.sublayers)
+            if ([l isKindOfClass:[CAGradientLayer class]]) l.frame = self.runButton.bounds;
+    });
 
     self.window.rootViewController = vc;
     [self.window makeKeyAndVisible];
@@ -381,7 +513,7 @@ static void refreshRootPill(void) {
 }
 
 - (void)updateRunTitle {
-    [self.runButton setTitle:[NSString stringWithFormat:@">   (%lu)",
+    [self.runButton setTitle:[NSString stringWithFormat:@"Run selected  (%lu)",
                               (unsigned long)self.selected.count] forState:UIControlStateNormal];
 }
 
