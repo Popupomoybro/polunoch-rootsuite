@@ -111,10 +111,13 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
     size_t groomSz[] = { 4032, 4288 };   // 4*(32*DX+16) for DX=31 and DX=33
     int nGroom = (int)(sizeof(groomSz) / sizeof(groomSz[0]));
     int cap = regions * (1 + nGroom);
-    void **ptrs = (void **)calloc((size_t)cap, sizeof(void *));
-    size_t *szl = (size_t *)calloc((size_t)cap, sizeof(size_t));
-    int *ids  = (int *)calloc((size_t)cap, sizeof(int));
-    if (!ptrs || !szl || !ids) { free(ptrs); free(szl); free(ids); return -1; }
+    // the bookkeeping lives on the STACK, not the heap: the OOB can zero heap
+    // words (it zeroed our detector fill), and a corrupted ptrs[i] would make the
+    // full scan walk a bad pointer and die mid-measurement.
+    if (cap <= 0 || cap > 4096) return -1;
+    void *ptrs[4096];
+    size_t szl[4096];
+    int ids[4096];
     int n = 0, obj = 0;
     for (int r = 0; r < regions; r++) {
         void *d = malloc(4096);
@@ -155,7 +158,13 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
     // at the >16 cutoff, so only the first 17 detectors were ever measured and
     // the shape of the hit (which u16 inside the word, and how many blocks) was
     // invisible.  Print got AND want verbatim, up to 24 lines, then the total.
-    for (size_t off = 0; off + 8 <= sz; off += 8) {
+    // the blocks are intentionally NOT freed: if the render's OOB also touched
+        // malloc metadata (the 15 Nov CFNetwork freelist trap), free() trips the
+        // zone's consistency check and kills the process -- and it would do so
+        // BETWEEN the corruption lines and the verdict.  The carpet is per-run
+        // (the module returns right after the verdict), so the ~1.5 MB leak is
+        // the price of a complete measurement.
+        for (size_t off = 0; off + 8 <= sz; off += 8) {
             uint64_t want = CarpetWant(off, ids[i]);
             if (q[off / 8] != want) {
                 corrupt++;
@@ -168,11 +177,8 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
                 }
             }
         }
-        free(p);
     }
-    free(ptrs);
-    free(szl);
-    free(ids);
+    // ptrs/szl/ids kept alive on purpose (see above): no free at all here.
     AvePost([NSString stringWithFormat:@"86950 carpet scan: %d corrupted words (%d "
              @"printed) over the whole carpet (%d blocks)", corrupt, printed, n]);
     return corrupt;
