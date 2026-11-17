@@ -283,6 +283,7 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
                              i, sz, off, (unsigned long long)q[off / 8],
                              (unsigned long long)want, ids[i]]);
                 }
+                }
             }
         }
     // ptrs/szl/ids kept alive on purpose (see above): no free at all here.
