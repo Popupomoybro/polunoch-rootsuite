@@ -245,12 +245,11 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
     // probe window), so the scan and everything it prints run under g_post_jb:
     // a fault there is recorded, named, and the module returns with the verdict
     // partial-but-honest instead of the process dying silently.
+    int corrupt = 0;      // declared outside the guard: the verdict is reported on
+    int printed = 0;    // both the normal and the fault path
     if (sigsetjmp(g_post_jb, 1) == 0) {
         g_probe_thread = (uint64_t)(uintptr_t)pthread_self();
         g_in_probe = 1;
-
-    int corrupt = 0;
-    int printed = 0;
     for (int i = 0; i < n; i++) {
         void *p = ptrs[i];
         size_t sz = szl[i];
