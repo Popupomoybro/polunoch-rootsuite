@@ -45,6 +45,7 @@
 #include <pthread.h>
 
 static sigjmp_buf           g_fault_jb;
+static sigjmp_buf           g_post_jb;   // the second window: post-render phase
 static volatile sig_atomic_t g_in_probe = 0;
 static volatile sig_atomic_t g_in_fault = 0;
 static volatile uint64_t    g_probe_thread = 0;
@@ -237,6 +238,17 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
     NSString *r = ModThumbPDF(pdfName, [NSString stringWithFormat:@"86950-C%d", obj], maxPx);
     AvePost([NSString stringWithFormat:@"86950 carpet-render: %@", r]);
 
+    // The post-render phase is its own guarded window: if the render's OOB hit
+    // malloc metadata, the NEXT allocation (these very AvePost/NSString calls)
+    // trips the zone consistency check -- the 15 Nov CFNetwork trap, but now on
+    // our own thread.  The render guard cannot catch that (it runs outside the
+    // probe window), so the scan and everything it prints run under g_post_jb:
+    // a fault there is recorded, named, and the module returns with the verdict
+    // partial-but-honest instead of the process dying silently.
+    if (sigsetjmp(g_post_jb, 1) == 0) {
+        g_probe_thread = (uint64_t)(uintptr_t)pthread_self();
+        g_in_probe = 1;
+
     int corrupt = 0;
     int printed = 0;
     for (int i = 0; i < n; i++) {
@@ -273,10 +285,19 @@ static int ModGroomScan(int regions, size_t each, NSString *pdfName, int maxPx) 
                 }
             }
         }
-    }
     // ptrs/szl/ids kept alive on purpose (see above): no free at all here.
-    AvePost([NSString stringWithFormat:@"86950 carpet scan: %d corrupted words (%d "
-             @"printed) over the whole carpet (%d blocks)", corrupt, printed, n]);
+        g_in_probe = 0;
+        AvePost([NSString stringWithFormat:@"86950 carpet scan: %d corrupted words (%d "
+                 @"printed) over the whole carpet (%d blocks)", corrupt, printed, n]);
+    } else {
+        g_in_probe = 0;
+        // a fault INSIDE the scan/print phase: name it, keep the process alive
+        AvePost([NSString stringWithFormat:@"86950 FAULT post-render phase: sig=%d "
+                 @"far=%#llx pc=%#llx esr=%#08llx (an allocation tripped a corrupted "
+                 @"zone - the metadata-corruption branch; verdict is partial)",
+                 g_sig, (unsigned long long)g_far, (unsigned long long)g_pc,
+                 (unsigned long long)g_esr]);
+    }
     return corrupt;
 }
 
