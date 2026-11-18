@@ -25,6 +25,7 @@
 #import <string.h>
 #import <stdlib.h>
 #import <stdint.h>
+#import <errno.h>
 #import <signal.h>
 #import <setjmp.h>
 #import <sys/mman.h>
@@ -180,12 +181,16 @@ NSString *ModShading5Force(void) {
     double d; memcpy(&d, &bits, 8);
     AvePost([NSString stringWithFormat:@"112611 aim value bits=%#llx (%.17g)", bits, d]);
 
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp) tmp = "/tmp";
-    char path[512];
-    snprintf(path, sizeof path, "%s%s", tmp[strlen(tmp)-1] == '/' ? "" : "/", "f112611.pdf");
+    // the container's own directories (TMPDIR guessing from getenv is not
+    // guaranteed under the sandbox - the first device run proved it: fopen
+    // failed and the run died before the render)
+    NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *dir = dirs.firstObject ?: NSTemporaryDirectory();
+    NSString *pdfPath = [dir stringByAppendingPathComponent:@"f112611.pdf"];
+    const char *path = pdfPath.fileSystemRepresentation;
+    AvePost([NSString stringWithFormat:@"112611: writing %@", pdfPath]);
     if (write_pdf(path, bits) != 0) {
-        AvePost(@"112611: cannot write the probe PDF");
+        AvePost([NSString stringWithFormat:@"112611: cannot write the probe PDF (errno=%d)", errno]);
         return @"112611: PDF generation failed";
     }
 
