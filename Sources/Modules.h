@@ -70,6 +70,7 @@ NSString *ModKernelSelectorSweep(void);
 NSString *ModAppGroupDiag(void);
 NSString *ModCGShadingOOB(void);   // CoreGraphics Type-5 shading OOB write (CVE-2026-112611)
 NSString *ModCVE86950(void);       // ImageIO PDF thumbnail heap OOB write (CVE-2026-86950)
+NSString *ModMediaRemoteDD(void);  // CVE-2026-43723: mediaremoted path traversal -> root write
 // dispatchers
 NSString *RunModule(NSString *name);
 NSString *RunRootPath(NSString *name);
