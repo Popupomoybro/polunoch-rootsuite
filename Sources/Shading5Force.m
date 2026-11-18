@@ -106,25 +106,36 @@ static int write_pdf(const char *path, uint64_t bits, int nout) {
     return 0;
 }
 
+// renders and answers "did it paint?": the count of non-white pixels in the
+// 64x64 bitmap.  A shading that is skipped by the parser paints nothing, so
+// this separates "no fault because nothing rendered" from "no fault because
+// the overflow lands silently".
 static int render_pdf(const char *path) {
     CFURLRef u = CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault,
                (const UInt8 *)path, (CFIndex)strlen(path), false);
-    if (!u) return 1;
+    if (!u) return -1;
     CGPDFDocumentRef doc = CGPDFDocumentCreateWithURL(u);
     CFRelease(u);
-    if (!doc) return 1;
+    if (!doc) return -2;
     CGPDFPageRef page = CGPDFDocumentGetPage(doc, 1);
-    if (!page) { CGPDFDocumentRelease(doc); return 1; }
+    if (!page) { CGPDFDocumentRelease(doc); return -3; }
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
     CGContextRef ctx = CGBitmapContextCreate(NULL, 64, 64, 8, 0, cs,
                                              (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
     CGColorSpaceRelease(cs);
-    if (ctx) {
-        CGContextDrawPDFPage(ctx, page);
-        CGContextRelease(ctx);
+    if (!ctx) { CGPDFDocumentRelease(doc); return -4; }
+    CGContextDrawPDFPage(ctx, page);
+    int painted = 0;
+    uint8_t *px = CGBitmapContextGetData(ctx);
+    if (px) {
+        for (int i = 0; i < 64 * 64; i++) {
+            uint8_t r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2];
+            if (r < 250 || g < 250 || b < 250) painted++;
+        }
     }
+    CGContextRelease(ctx);
     CGPDFDocumentRelease(doc);
-    return 0;
+    return painted;
 }
 
 // ---- the in-handler map (V545 recipe) -------------------------------------
@@ -225,6 +236,15 @@ NSString *ModShading5Force(void) {
 
     g_tid = (volatile pthread_t)pthread_self();
 
+    // control: the bundle's known-good type-5 shading must paint; if it does
+    // and ours does not, our generated PDF is rejected by the parser before
+    // the render ever happens
+    NSString *ctl = [NSString stringWithFormat:@"%@/control_shading_type5.pdf",
+                     [NSBundle mainBundle].bundlePath];
+    int ctlPainted = render_pdf(ctl.fileSystemRepresentation);
+    AvePost([NSString stringWithFormat:@"112611 control render: %d/4096 painted (rc=%d)",
+             ctlPainted > 0 ? ctlPainted : 0, ctlPainted]);
+
     static void *car_ptrs[NCAR * NCARS];
     static size_t car_sz[NCAR * NCARS];
     static int car_id[NCAR * NCARS];
@@ -252,8 +272,9 @@ NSString *ModShading5Force(void) {
 
         g_in_probe = 1; g_mapped = 0; g_page = 0; g_far = 0; g_sig = 0; g_esr = 0;
         if (sigsetjmp(g_jb, 1) == 0) {
-            render_pdf(path);
+            int painted = render_pdf(path);
             g_in_probe = 0;
+            AvePost([NSString stringWithFormat:@"112611 C0=%d painted %d/4096", nout, painted]);
         } else {
             g_in_probe = 0;
             AvePost([NSString stringWithFormat:@"112611 C0=%d: fault left the store unmapped", nout]);
