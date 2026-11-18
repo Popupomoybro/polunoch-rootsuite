@@ -97,6 +97,11 @@ static void fault_arm(void) {
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS,  &sa, NULL);
     sigaction(SIGTRAP, &sa, NULL);   // the malloc freelist check traps too
+    // SIGABRT: the 18 Nov runs died in the REPEAT phase with NO FAULT line at all
+    // - the death is not a signal we caught, and the newjail strings document
+    // "MallocCorruptionAbort": the zone can abort instead of trap, and CoreGraphics
+    // aborts on malformed input (the public 112611 PoC installs this very handler).
+    sigaction(SIGABRT, &sa, NULL);
 }
 
 static NSString *ModThumbPDF(NSString *pdfName, NSString *tag, int maxPx) {
