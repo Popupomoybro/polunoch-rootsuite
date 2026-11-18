@@ -210,6 +210,7 @@ NSString *RunRootPath(NSString *name) {
     if ([name hasPrefix:@"CG Type-5 shading OOB"])   return ModCGShadingOOB();
     if ([name hasPrefix:@"CVE-2026-86950 thumbnail"]) return ModCVE86950();
     if ([name hasPrefix:@"43723"])                    return ModMediaRemoteDD();
+    if ([name hasPrefix:@"112611 force"])         return ModShading5Force();
     if ([name hasPrefix:@"IOSurfaceRoot selectors"]) return ModIosurfaceRootSelectors();
     if ([name hasPrefix:@"GPU process carrier"])     return ModGpuCarrier();
     return nil;
