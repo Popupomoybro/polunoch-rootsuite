@@ -73,6 +73,7 @@ NSString *ModCVE86950(void);       // ImageIO PDF thumbnail heap OOB write (CVE-
 NSString *ModMediaRemoteDD(void);  // CVE-2026-43723: mediaremoted path traversal -> root write
 NSString *ModShading5Force(void);  // CVE-2026-112611: mmap-force aimed write (public V545 recipe)
 NSString *ModIsurfUAF(void);       // CVE-2026-112477: IOSurfaceRootUserClient registry UAF (kernel)
+NSString *ModIsurfUAF2(void);      // phase 2: the user-client lifetime UAF the device panic proved - reclaim groom
 // dispatchers
 NSString *RunModule(NSString *name);
 NSString *RunRootPath(NSString *name);

