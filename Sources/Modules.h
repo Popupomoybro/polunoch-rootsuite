@@ -72,6 +72,7 @@ NSString *ModCGShadingOOB(void);   // CoreGraphics Type-5 shading OOB write (CVE
 NSString *ModCVE86950(void);       // ImageIO PDF thumbnail heap OOB write (CVE-2026-86950)
 NSString *ModMediaRemoteDD(void);  // CVE-2026-43723: mediaremoted path traversal -> root write
 NSString *ModShading5Force(void);  // CVE-2026-112611: mmap-force aimed write (public V545 recipe)
+NSString *ModIsurfUAF(void);       // CVE-2026-112477: IOSurfaceRootUserClient registry UAF (kernel)
 // dispatchers
 NSString *RunModule(NSString *name);
 NSString *RunRootPath(NSString *name);

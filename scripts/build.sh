@@ -12,8 +12,8 @@ mkdir -p "$OUT/Payload/$APP.app/Frameworks"
 
 clang -isysroot "$SDK" -target arm64-apple-ios15.0 -O1 \
   -framework UIKit -framework Foundation -framework WebKit -framework JavaScriptCore -framework CoreGraphics -framework ImageIO -framework QuartzCore \
-  -framework IOSurface -framework IOKit -framework CoreServices \
-  Sources/main.m Sources/AppDelegate.m Sources/Modules.m Sources/Root.m Sources/WebKitProbes.m Sources/WorseQuery.m Sources/RootPaths.m Sources/RootPaths2.m Sources/LastMile.m Sources/KernelPaths.m Sources/CGShading.m Sources/CVE86950.m Sources/MediaRemoteDD.m Sources/Shading5Force.m Sources/Scribble.m Sources/Unified.m \
+  -framework IOSurface -framework IOKit -framework CoreServices -framework Metal -framework CoreVideo \
+  Sources/main.m Sources/AppDelegate.m Sources/Modules.m Sources/Root.m Sources/WebKitProbes.m Sources/WorseQuery.m Sources/RootPaths.m Sources/RootPaths2.m Sources/LastMile.m Sources/KernelPaths.m Sources/CGShading.m Sources/CVE86950.m Sources/MediaRemoteDD.m Sources/Shading5Force.m Sources/Scribble.m Sources/Unified.m Sources/IsurfUAF.m \
   -o "$OUT/Payload/$APP.app/$APP"
 
 cp Resources/Info.plist        "$OUT/Payload/$APP.app/"

