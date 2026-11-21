@@ -6,7 +6,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-26-intel      # the only macOS label this account can schedule
+    runs-on: macos-26      # the only macOS label this account can schedule
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
