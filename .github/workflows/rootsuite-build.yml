@@ -1,4 +1,4 @@
-name: build-rootsuite
+name: rootsuite-build
 # Manual only: macOS minutes are billed 10x.  No concurrency group (a new dispatch
 # used to cancel the running build).
 on:
