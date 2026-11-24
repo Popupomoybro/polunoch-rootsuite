@@ -213,5 +213,7 @@ NSString *RunRootPath(NSString *name) {
     if ([name hasPrefix:@"112611 force"])         return ModShading5Force();
     if ([name hasPrefix:@"IOSurfaceRoot selectors"]) return ModIosurfaceRootSelectors();
     if ([name hasPrefix:@"GPU process carrier"])     return ModGpuCarrier();
+    if ([name hasPrefix:@"64788 GPU UAF oracle"]) return ModIOGPUUAFOracle();
+    if ([name hasPrefix:@"46285 vm_map wrap"])     return ModVmMapWrap();
     return nil;
 }
