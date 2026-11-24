@@ -24,6 +24,8 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <mach/mach.h>
+#import <IOKit/IOKitLib.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <malloc/malloc.h>
 #import <sys/mman.h>
 #import <unistd.h>
