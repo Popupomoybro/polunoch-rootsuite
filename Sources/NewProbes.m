@@ -244,7 +244,7 @@ NSString *ModAioRace(void) {
                     AveLog(S(@"[aio] round %d: aio_read %d -> %d", round, i, errno));
             }
             // tear the descriptor down under the in-flight requests
-            aio_cancel(wfd);
+            aio_cancel(wfd, NULL);   // NULL = cancel every outstanding request on this fd
             close(wfd);
             // let the completions/teardown run
             usleep(30000);
