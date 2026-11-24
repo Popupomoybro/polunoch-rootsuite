@@ -455,8 +455,10 @@ static UILabel *RSHead(NSString *t) {
     [st addArrangedSubview:RSRow(@"KERNELCACHE", @"UUID D31DF1C78E876755F1038A1159C7EB0E - matches every device panic")];
     [st addArrangedSubview:RSRow(@"KASLR", @"slide per boot: 0x11798000 (21.11) / 0xc764000 (23.11); mapping verified")];
     [st addArrangedSubview:RSRow(@"PANICS (112477)", @"5 kernel data-aborts, all at one instruction; reproduced on demand")];
-    [st addArrangedSubview:RSRow(@"FAULT", @"casa x8, x9, [x0+8] - kernelcache file offset 0x1026418 | lock_mtx.c:319")];
-    [st addArrangedSubview:RSRow(@"SEMANTICS", @"far = x0 + 8, where x0 = lock pointer from [obj+0x148] (IOSurface 393.2.9)")];
+    [st addArrangedSubview:RSRow(@"FAULT", @"casa x8, x9, [x0+8] - kernelcache file offset 0x1026418 | lck_mtx_lock fast path, lock_mtx.c ~1053")];
+    [st addArrangedSubview:RSRow(@"SEMANTICS", @"far = x0 + 8, where x0 = lock pointer from [obj+0x148] (IOSurface 393.2.9 shared-list insert)")];
+    [st addArrangedSubview:RSRow(@"LOCK", @"lck_mtx_t 16B: +0x08 owner-word is the CAS target; thread->ctid comes from tpidr_el1+0x440")];
+    [st addArrangedSubview:RSRow(@"NOTE", @"the adjacent lck_mtx_destroy panic (lock_mtx.c:319) is NOT in the faulting path - corrected 24.11 by lock_analysis.md")];
     [st addArrangedSubview:RSRow(@"CALL PATH", @"AGXG13P 341.11 -> IOGPUFamily 129.2.10 -> IOSurface 393.2.9 -> kernel")];
     [st addArrangedSubview:RSRow(@"VARIANTS", @"3x far=0x8 (NULL lock) | 1x far=0x7204459e8 (app mapping)")];
     [st addArrangedSubview:RSRow(@"UAF STATUS", @"HYPOTHESIS, not proven - a panic is not proof of UAF; a canary in far would be")];
