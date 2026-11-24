@@ -36,13 +36,9 @@
 #import "AppDelegate.h"
 #import "Util.h"
 
-// Metal (linked in build.sh)
-#if defined(__has_include)
-#  if __has_include(<Metal/Metal.h>)
-#    import <Metal/Metal.h>
-#    define RS_HAVE_METAL 1
-#  endif
-#endif
+// Metal (linked in build.sh with -framework Metal)
+#import <Metal/Metal.h>
+#define RS_HAVE_METAL 1
 
 // IOSurface: not importable from the plain iOS SDK
 typedef struct __IOSurface *IOSurfaceRef_;
