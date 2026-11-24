@@ -16,7 +16,7 @@ static UIColor *WARN(void)   { return [UIColor colorWithRed:1.000 green:0.624 bl
 static UIColor *INFO(void)   { return [UIColor colorWithRed:0.392 green:0.824 blue:1.000 alpha:1]; }
 static UIColor *DANGER(void) { return [UIColor colorWithRed:1.000 green:0.271 blue:0.341 alpha:1]; }
 
-// MARK: - RootSuite logo: the "hex root core" — a hexagon ring (the molecular
+// MARK: - RootSuite logo: the "hex root core" - a hexagon ring (the molecular
 // nod), a descending root tree and a pulsing core node, drawn with layers so
 // the ring can turn and the glow can breathe.
 @interface RSLogoView : UIView
@@ -450,16 +450,16 @@ static UILabel *RSHead(NSString *t) {
         [st.widthAnchor constraintEqualToAnchor:sc.widthAnchor constant:-32],
     ]];
     [st addArrangedSubview:RSHead(@"KERNEL DIAGNOSTICS")];
-    [st addArrangedSubview:RSRow(@"DEVICE", @"iPhone13,1 (iPhone 12 mini) · Apple A14 / T8101 · arm64e")];
-    [st addArrangedSubview:RSRow(@"SYSTEM", @"iOS 26.2 beta 1 · build 23C5027f · xnu-12377.60.50.502.2~1")];
-    [st addArrangedSubview:RSRow(@"KERNELCACHE", @"UUID D31DF1C78E876755F1038A1159C7EB0E — matches every device panic")];
+    [st addArrangedSubview:RSRow(@"DEVICE", @"iPhone13,1 (iPhone 12 mini) | Apple A14 / T8101 | arm64e")];
+    [st addArrangedSubview:RSRow(@"SYSTEM", @"iOS 26.2 beta 1 | build 23C5027f | xnu-12377.60.50.502.2~1")];
+    [st addArrangedSubview:RSRow(@"KERNELCACHE", @"UUID D31DF1C78E876755F1038A1159C7EB0E - matches every device panic")];
     [st addArrangedSubview:RSRow(@"KASLR", @"slide per boot: 0x11798000 (21.11) / 0xc764000 (23.11); mapping verified")];
-    [st addArrangedSubview:RSRow(@"PANICS · 112477", @"5 kernel data-aborts, all at one instruction; reproduced on demand")];
-    [st addArrangedSubview:RSRow(@"FAULT", @"casa x8, x9, [x0+8] — kernelcache file offset 0x1026418 · lock_mtx.c:319")];
+    [st addArrangedSubview:RSRow(@"PANICS (112477)", @"5 kernel data-aborts, all at one instruction; reproduced on demand")];
+    [st addArrangedSubview:RSRow(@"FAULT", @"casa x8, x9, [x0+8] - kernelcache file offset 0x1026418 | lock_mtx.c:319")];
     [st addArrangedSubview:RSRow(@"SEMANTICS", @"far = x0 + 8, where x0 = lock pointer from [obj+0x148] (IOSurface 393.2.9)")];
-    [st addArrangedSubview:RSRow(@"CALL PATH", @"AGXG13P 341.11 → IOGPUFamily 129.2.10 → IOSurface 393.2.9 → kernel")];
-    [st addArrangedSubview:RSRow(@"VARIANTS", @"3× far=0x8 (NULL lock) · 1× far=0x7204459e8 (app mapping)")];
-    [st addArrangedSubview:RSRow(@"UAF STATUS", @"HYPOTHESIS, not proven — a panic is not proof of UAF; a canary in far would be")];
+    [st addArrangedSubview:RSRow(@"CALL PATH", @"AGXG13P 341.11 -> IOGPUFamily 129.2.10 -> IOSurface 393.2.9 -> kernel")];
+    [st addArrangedSubview:RSRow(@"VARIANTS", @"3x far=0x8 (NULL lock) | 1x far=0x7204459e8 (app mapping)")];
+    [st addArrangedSubview:RSRow(@"UAF STATUS", @"HYPOTHESIS, not proven - a panic is not proof of UAF; a canary in far would be")];
     UIButton *probe = [UIButton buttonWithType:UIButtonTypeSystem];
     probe.translatesAutoresizingMaskIntoConstraints = NO;
     [probe setTitle:@"Refresh ROOTSTATE (live probe)" forState:UIControlStateNormal];
@@ -505,12 +505,12 @@ static UILabel *RSHead(NSString *t) {
         [st.widthAnchor constraintEqualToAnchor:sc.widthAnchor constant:-32],
     ]];
     [st addArrangedSubview:RSHead(@"ABOUT")];
-    [st addArrangedSubview:RSRow(@"BUILD", @"RootSuite · 49 modules · branch hunt-unit6 + stage-1 tabs")];
-    [st addArrangedSubview:RSRow(@"SIGNED BY", @"Sideloadly · team 5G33ZSZ4G5 · ask.polunoch.ave2trigger")];
+    [st addArrangedSubview:RSRow(@"BUILD", @"RootSuite | 49 modules | branch hunt-unit6 + stage-1 tabs")];
+    [st addArrangedSubview:RSRow(@"SIGNED BY", @"Sideloadly | team 5G33ZSZ4G5 | ask.polunoch.ave2trigger")];
     [st addArrangedSubview:RSRow(@"LOG MIRROR", @"POST http://192.168.1.126:8098/log (best-effort; the phone is primary)")];
-    [st addArrangedSubview:RSRow(@"FORENSIC FILE", @"rs112477.log in the app container — survives crashes and reboots")];
+    [st addArrangedSubview:RSRow(@"FORENSIC FILE", @"rs112477.log in the app container - survives crashes and reboots")];
     [st addArrangedSubview:RSRow(@"RESUMABLE STATE", @"P2KRUN unit/round lines: a panic is attributable to its round")];
-    [st addArrangedSubview:RSRow(@"RULE", @"ROOTSTATE comes only from a live probe — never shown without uid 0")];
+    [st addArrangedSubview:RSRow(@"RULE", @"ROOTSTATE comes only from a live probe - never shown without uid 0")];
     [st addArrangedSubview:RSRow(@"INSTALLERS", @"Sileo / Terminal on the Modules tab appear when root is real")];
 }
 @end
@@ -623,7 +623,7 @@ static UILabel *RSHead(NSString *t) {
     // keeps only the status line, so no TextKit work happens per log line
 
     UILabel *credit = [UILabel new]; credit.translatesAutoresizingMaskIntoConstraints = NO;
-    credit.text = @"Sideloadly signed • team 5G33ZSZ4G5 • every module offline-measured";
+    credit.text = @"Sideloadly signed - team 5G33ZSZ4G5 - every module offline-measured";
     credit.font = [UIFont systemFontOfSize:9]; credit.textColor = SUB();
     credit.textAlignment = NSTextAlignmentCenter;
 
