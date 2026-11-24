@@ -215,5 +215,6 @@ NSString *RunRootPath(NSString *name) {
     if ([name hasPrefix:@"GPU process carrier"])     return ModGpuCarrier();
     if ([name hasPrefix:@"64788 GPU UAF oracle"]) return ModIOGPUUAFOracle();
     if ([name hasPrefix:@"46285 vm_map wrap"])     return ModVmMapWrap();
+    if ([name hasPrefix:@"AIO teardown race"])   return ModAioRace();
     return nil;
 }
