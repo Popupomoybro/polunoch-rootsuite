@@ -112,7 +112,14 @@ static UIColor *DANGER(void) { return [UIColor colorWithRed:1.000 green:0.271 bl
 }
 @end
 
-static UITextView *g_log = nil;
+// The log is a PLAIN STRING, not a UITextView: the offscreen-text-view design
+// rebuilt a TextKit attributed string (NSRLEArray, malloc freelist) on every
+// log line, which is exactly the heap-corruption chain in the .ips
+// ([NSConcreteMutableAttributedString initWithString:] -> NSRLEArray ->
+// _xzm_xzone_malloc_freelist brk 1).  A text view is only ever handed the
+// buffer when a window is actually open (RSTextVC / the Log tab).
+static NSMutableString *g_log = nil;
+static const NSUInteger kLogMaxChars = 262144;   // 256 KB ring: keep it bounded
 static UILabel *g_status = nil;
 static UILabel *g_rootPill = nil;
 static UIViewController *g_mainVC = nil;
@@ -120,11 +127,18 @@ static NSString *const kEndpoint = @"http://192.168.1.125:8098/log";
 
 void AveLog(NSString *s) {
     if (!s) s = @"";
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!g_log) return;
-        g_log.text = [g_log.text stringByAppendingFormat:@"%@\n", s];
-        [g_log scrollRangeToVisible:NSMakeRange(g_log.text.length - 1, 1)];
-    });
+    if (!g_log) g_log = [[NSMutableString alloc] init];   // +1: survives the pool drain (build.sh has no -fobjc-arc)
+    @synchronized(g_log) {
+        [g_log appendFormat:@"%@\n", s];
+        if (g_log.length > kLogMaxChars)
+            [g_log deleteCharactersInRange:NSMakeRange(0, g_log.length - kLogMaxChars)];
+    }
+}
+
+// What a visible text view shows (called from the UI thread only).
+NSString *AveLogText(void) {
+    if (!g_log) return @"";
+    @synchronized(g_log) { return [NSString stringWithString:g_log]; }
 }
 
 void AveSetStatus(NSString *s) {
@@ -257,6 +271,7 @@ static void refreshRootPill(void) {
 @interface RSTextVC : UIViewController
 @property (nonatomic, copy) void (^textProvider)(void);
 @property (nonatomic, strong) NSTimer *follow;
+@property (nonatomic, assign) BOOL tabMode;   // embedded as a tab: no Close button
 @end
 
 @implementation RSTextVC
@@ -290,6 +305,7 @@ static void refreshRootPill(void) {
     [x setTitleColor:SUB() forState:UIControlStateNormal];
     x.backgroundColor = CARD(); x.layer.cornerRadius = 14; x.clipsToBounds = YES;
     [x addTarget:self action:@selector(close:) forControlEvents:UIControlEventTouchUpInside];
+    if (self.tabMode) x.hidden = YES;   // as a tab there is nothing to dismiss
 
     UIButton *sh = [UIButton buttonWithType:UIButtonTypeSystem];
     sh.translatesAutoresizingMaskIntoConstraints = NO;
@@ -332,8 +348,10 @@ static void refreshRootPill(void) {
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
-    // follow the live tail while the window is open
-    self.follow = [NSTimer scheduledTimerWithTimeInterval:0.7 target:self
+    // follow the live tail while the window is open; 1.5s + the change check in
+    // -refresh keeps the TextKit layout engine out of the per-line path (the
+    // .ips crash chain lives there)
+    self.follow = [NSTimer scheduledTimerWithTimeInterval:1.5 target:self
                                                  selector:@selector(refresh) userInfo:nil repeats:YES];
     [self refresh];
 }
@@ -345,13 +363,15 @@ static void refreshRootPill(void) {
 
 - (void)refresh {
     UITextView *tv = (UITextView *)self.view;
+    NSString *t = AveLogText();
+    if (tv.text.length == t.length && [tv.text isEqualToString:t]) return;  // unchanged: no rebuild
     BOOL atEnd = (tv.contentOffset.y >= tv.contentSize.height - tv.bounds.size.height - 40);
-    tv.text = g_log ? g_log.text : @"";
-    if (atEnd) [tv scrollRangeToVisible:NSMakeRange(tv.text.length - 1, 1)];
+    tv.text = t;
+    if (atEnd && t.length) [tv scrollRangeToVisible:NSMakeRange(t.length - 1, 1)];
 }
 
 - (void)share:(id)sender {
-    NSString *text = g_log ? g_log.text : @"";
+    NSString *text = AveLogText();
     if (!text.length) text = @"(the log is empty - no module has run yet)";
     UIActivityViewController *av = [[UIActivityViewController alloc]
         initWithActivityItems:@[text] applicationActivities:nil];
@@ -360,7 +380,7 @@ static void refreshRootPill(void) {
 }
 
 - (void)copyAll:(id)sender {
-    UIPasteboard.generalPasteboard.string = g_log ? g_log.text : @"";
+    UIPasteboard.generalPasteboard.string = AveLogText();
 }
 
 - (void)close:(id)sender {
@@ -369,6 +389,132 @@ static void refreshRootPill(void) {
 @end
 
 // MARK: - AppDelegate
+// ===========================================================================
+// Stage 1 of the redesign: a plain tab shell.  STOCK UIKit only - no blur, no
+// gradients, no custom layers - so a launch regression cannot come from the
+// materials.  Materials return in stage 2/3 on top of this working base.
+// ===========================================================================
+
+// ---- one key/value row: label over value, monospaced, wraps ---------------
+static UILabel *RSRow(NSString *key, NSString *val) {
+    UILabel *l = [UILabel new];
+    l.translatesAutoresizingMaskIntoConstraints = NO;
+    l.numberOfLines = 0;
+    NSMutableAttributedString *a = [[NSMutableAttributedString alloc] initWithString:key
+        attributes:@{NSFontAttributeName : [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightBold],
+                     NSForegroundColorAttributeName : SUB()}];
+    [a appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n"
+        attributes:@{NSFontAttributeName : [UIFont systemFontOfSize:3]}]];
+    [a appendAttributedString:[[NSAttributedString alloc] initWithString:val
+        attributes:@{NSFontAttributeName : [UIFont monospacedSystemFontOfSize:10],
+                     NSForegroundColorAttributeName : TEXT()}]];
+    l.attributedText = a;
+    return l;
+}
+
+static UILabel *RSHead(NSString *t) {
+    UILabel *l = [UILabel new]; l.translatesAutoresizingMaskIntoConstraints = NO;
+    l.attributedText = [[NSAttributedString alloc] initWithString:t
+        attributes:@{NSKernAttributeName : @2.2,
+                     NSFontAttributeName : [UIFont systemFontOfSize:15 weight:UIFontWeightHeavy],
+                     NSForegroundColorAttributeName : TEXT()}];
+    return l;
+}
+
+// ---- the Diagnostics tab: the VERIFIED kernel facts (PANIC_ANALYSIS.md) ----
+@interface RSDiagVC : UIViewController
+@end
+
+@implementation RSDiagVC
+- (void)loadView {
+    UIView *v = [UIView new]; v.backgroundColor = BG();
+    self.view = v;
+    UILayoutGuide *g = v.safeAreaLayoutGuide;
+    UIScrollView *sc = [[UIScrollView alloc] init];
+    sc.translatesAutoresizingMaskIntoConstraints = NO;
+    sc.showsVerticalScrollIndicator = NO;
+    [v addSubview:sc];
+    UIStackView *st = [[UIStackView alloc] init];
+    st.axis = UILayoutConstraintAxisVertical; st.spacing = 12;
+    st.translatesAutoresizingMaskIntoConstraints = NO;
+    [sc addSubview:st];
+    [NSLayoutConstraint activateConstraints:@[
+        [sc.topAnchor constraintEqualToAnchor:g.topAnchor],
+        [sc.leadingAnchor constraintEqualToAnchor:g.leadingAnchor],
+        [sc.trailingAnchor constraintEqualToAnchor:g.trailingAnchor],
+        [sc.bottomAnchor constraintEqualToAnchor:g.bottomAnchor],
+        [st.topAnchor constraintEqualToAnchor:sc.topAnchor constant:16],
+        [st.leadingAnchor constraintEqualToAnchor:sc.leadingAnchor constant:16],
+        [st.trailingAnchor constraintEqualToAnchor:sc.trailingAnchor constant:-16],
+        [st.bottomAnchor constraintEqualToAnchor:sc.bottomAnchor constant:-16],
+        [st.widthAnchor constraintEqualToAnchor:sc.widthAnchor constant:-32],
+    ]];
+    [st addArrangedSubview:RSHead(@"KERNEL DIAGNOSTICS")];
+    [st addArrangedSubview:RSRow(@"DEVICE", @"iPhone13,1 (iPhone 12 mini) · Apple A14 / T8101 · arm64e")];
+    [st addArrangedSubview:RSRow(@"SYSTEM", @"iOS 26.2 beta 1 · build 23C5027f · xnu-12377.60.50.502.2~1")];
+    [st addArrangedSubview:RSRow(@"KERNELCACHE", @"UUID D31DF1C78E876755F1038A1159C7EB0E — matches every device panic")];
+    [st addArrangedSubview:RSRow(@"KASLR", @"slide per boot: 0x11798000 (21.11) / 0xc764000 (23.11); mapping verified")];
+    [st addArrangedSubview:RSRow(@"PANICS · 112477", @"5 kernel data-aborts, all at one instruction; reproduced on demand")];
+    [st addArrangedSubview:RSRow(@"FAULT", @"casa x8, x9, [x0+8] — kernelcache file offset 0x1026418 · lock_mtx.c:319")];
+    [st addArrangedSubview:RSRow(@"SEMANTICS", @"far = x0 + 8, where x0 = lock pointer from [obj+0x148] (IOSurface 393.2.9)")];
+    [st addArrangedSubview:RSRow(@"CALL PATH", @"AGXG13P 341.11 → IOGPUFamily 129.2.10 → IOSurface 393.2.9 → kernel")];
+    [st addArrangedSubview:RSRow(@"VARIANTS", @"3× far=0x8 (NULL lock) · 1× far=0x7204459e8 (app mapping)")];
+    [st addArrangedSubview:RSRow(@"UAF STATUS", @"HYPOTHESIS, not proven — a panic is not proof of UAF; a canary in far would be")];
+    UIButton *probe = [UIButton buttonWithType:UIButtonTypeSystem];
+    probe.translatesAutoresizingMaskIntoConstraints = NO;
+    [probe setTitle:@"Refresh ROOTSTATE (live probe)" forState:UIControlStateNormal];
+    probe.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
+    [probe setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
+    probe.backgroundColor = ACCENT(); probe.layer.cornerRadius = 14;
+    [probe addTarget:self action:@selector(probe) forControlEvents:UIControlEventTouchUpInside];
+    [st addArrangedSubview:probe];
+    [probe.heightAnchor constraintEqualToConstant:44].active = YES;
+}
+- (void)probe {
+    refreshRootPill();   // the only root truth: a live probe
+    AveLog(@"[*] ROOTSTATE refreshed from the Diagnostics tab (live probe)");
+}
+@end
+
+// ---- the About tab: identity, mirror, forensic file, the rules -------------
+@interface RSAboutVC : UIViewController
+@end
+
+@implementation RSAboutVC
+- (void)loadView {
+    UIView *v = [UIView new]; v.backgroundColor = BG();
+    self.view = v;
+    UILayoutGuide *g = v.safeAreaLayoutGuide;
+    UIScrollView *sc = [[UIScrollView alloc] init];
+    sc.translatesAutoresizingMaskIntoConstraints = NO;
+    sc.showsVerticalScrollIndicator = NO;
+    [v addSubview:sc];
+    UIStackView *st = [[UIStackView alloc] init];
+    st.axis = UILayoutConstraintAxisVertical; st.spacing = 12;
+    st.translatesAutoresizingMaskIntoConstraints = NO;
+    [sc addSubview:st];
+    [NSLayoutConstraint activateConstraints:@[
+        [sc.topAnchor constraintEqualToAnchor:g.topAnchor],
+        [sc.leadingAnchor constraintEqualToAnchor:g.leadingAnchor],
+        [sc.trailingAnchor constraintEqualToAnchor:g.trailingAnchor],
+        [sc.bottomAnchor constraintEqualToAnchor:g.bottomAnchor],
+        [st.topAnchor constraintEqualToAnchor:sc.topAnchor constant:16],
+        [st.leadingAnchor constraintEqualToAnchor:sc.leadingAnchor constant:16],
+        [st.trailingAnchor constraintEqualToAnchor:sc.trailingAnchor constant:-16],
+        [st.bottomAnchor constraintEqualToAnchor:sc.bottomAnchor constant:-16],
+        [st.widthAnchor constraintEqualToAnchor:sc.widthAnchor constant:-32],
+    ]];
+    [st addArrangedSubview:RSHead(@"ABOUT")];
+    [st addArrangedSubview:RSRow(@"BUILD", @"RootSuite · 49 modules · branch hunt-unit6 + stage-1 tabs")];
+    [st addArrangedSubview:RSRow(@"SIGNED BY", @"Sideloadly · team 5G33ZSZ4G5 · ask.polunoch.ave2trigger")];
+    [st addArrangedSubview:RSRow(@"LOG MIRROR", @"POST http://192.168.1.126:8098/log (best-effort; the phone is primary)")];
+    [st addArrangedSubview:RSRow(@"FORENSIC FILE", @"rs112477.log in the app container — survives crashes and reboots")];
+    [st addArrangedSubview:RSRow(@"RESUMABLE STATE", @"P2KRUN unit/round lines: a panic is attributable to its round")];
+    [st addArrangedSubview:RSRow(@"RULE", @"ROOTSTATE comes only from a live probe — never shown without uid 0")];
+    [st addArrangedSubview:RSRow(@"INSTALLERS", @"Sileo / Terminal on the Modules tab appear when root is real")];
+}
+@end
+
 @interface AppDelegate () <UITableViewDataSource, UITableViewDelegate>
 @end
 
@@ -473,12 +619,8 @@ static void refreshRootPill(void) {
     g_status.textAlignment = NSTextAlignmentCenter;
     g_status.text = @"checking root...";
 
-    g_log = [UITextView new]; g_log.translatesAutoresizingMaskIntoConstraints = NO;
-    g_log.backgroundColor = [UIColor blackColor]; g_log.textColor = ACCENT();
-    g_log.font = [UIFont fontWithName:@"Menlo" size:9.5]; g_log.editable = NO; g_log.selectable = YES;
-    g_log.textContainerInset = UIEdgeInsetsMake(6, 8, 6, 8);
-    g_log.layer.cornerRadius = 10; g_log.layer.borderColor = HAIR().CGColor; g_log.layer.borderWidth = 0.5;
-    g_log.text = @"";
+    // the log lives in its own tab (RSTextVC as a tab root); the main screen
+    // keeps only the status line, so no TextKit work happens per log line
 
     UILabel *credit = [UILabel new]; credit.translatesAutoresizingMaskIntoConstraints = NO;
     credit.text = @"Sideloadly signed • team 5G33ZSZ4G5 • every module offline-measured";
@@ -490,7 +632,7 @@ static void refreshRootPill(void) {
     [vc.view addSubview:logBtn];
     [vc.view addSubview:self.table]; [vc.view addSubview:self.allButton];
     [vc.view addSubview:sileo]; [vc.view addSubview:term];
-    [vc.view addSubview:g_status]; [vc.view addSubview:g_log]; [vc.view addSubview:credit];
+    [vc.view addSubview:g_status]; [vc.view addSubview:credit];
     g_mainVC = vc;
 
     [NSLayoutConstraint activateConstraints:@[
@@ -529,10 +671,7 @@ static void refreshRootPill(void) {
         [g_status.topAnchor constraintEqualToAnchor:sileo.bottomAnchor constant:6],
         [g_status.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
         [g_status.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
-        [g_log.topAnchor constraintEqualToAnchor:g_status.bottomAnchor constant:5],
-        [g_log.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
-        [g_log.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
-        [credit.topAnchor constraintEqualToAnchor:g_log.bottomAnchor constant:5],
+        [credit.topAnchor constraintEqualToAnchor:g_status.bottomAnchor constant:5],
         [credit.leadingAnchor constraintEqualToAnchor:g.leadingAnchor constant:16],
         [credit.trailingAnchor constraintEqualToAnchor:g.trailingAnchor constant:-16],
         [credit.bottomAnchor constraintEqualToAnchor:g.bottomAnchor constant:-4],
@@ -544,7 +683,27 @@ static void refreshRootPill(void) {
             if ([l isKindOfClass:[CAGradientLayer class]]) l.frame = self.runButton.bounds;
     });
 
-    self.window.rootViewController = vc;
+    // ---- the stage-1 tab shell: stock UIKit, four destinations -------------
+    UITabBarController *tabs = [UITabBarController new];
+    tabs.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+    vc.title = @"Modules";
+    vc.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Modules"
+                                                image:[UIImage systemImageNamed:@"list.bullet"] tag:0];
+    RSTextVC *logTab = [RSTextVC new];
+    logTab.tabMode = YES;                     // no Close button as a tab
+    logTab.title = @"Log";
+    logTab.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Log"
+                                                     image:[UIImage systemImageNamed:@"text.alignleft"] tag:1];
+    RSDiagVC *diag = [RSDiagVC new];
+    diag.title = @"Diagnostics";
+    diag.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"Diagnostics"
+                                                   image:[UIImage systemImageNamed:@"stethoscope"] tag:2];
+    RSAboutVC *about = [RSAboutVC new];
+    about.title = @"About";
+    about.tabBarItem = [[UITabBarItem alloc] initWithTitle:@"About"
+                                                    image:[UIImage systemImageNamed:@"info.circle"] tag:3];
+    tabs.viewControllers = @[vc, logTab, diag, about];
+    self.window.rootViewController = tabs;
     [self.window makeKeyAndVisible];
 
     self.modules = [NSMutableArray array];

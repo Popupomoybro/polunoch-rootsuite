@@ -8,7 +8,6 @@
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 @property (nonatomic, strong) UIWindow *window;
 @property (nonatomic, strong) UITableView *table;
-@property (nonatomic, strong) UITextView *logView;
 @property (nonatomic, strong) UILabel *titleLabel;
 @property (nonatomic, strong) UILabel *subtitleLabel;
 @property (nonatomic, strong) UIButton *allButton;
@@ -25,3 +24,4 @@ void AvePost(NSString *s);
 void AveSleep(int ms);
 NSString *AveReadFile(NSString *path);
 void AveSetStatus(NSString *s);
+NSString *AveLogText(void);   // the whole log as a string (for visible views)
