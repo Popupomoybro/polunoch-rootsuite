@@ -83,6 +83,8 @@ NSString *ModJpegUAF(void);        // CVE-2026-20687: AppleJPEGDriver startDecod
 NSString *ModAksUAF(void);         // CVE-2026-20637: AppleSEPKeyStore IOCommandGate UAF (public PoC, tested 26.1-26.2)
 NSString *ModAksReclaim(void);     // 20637 + kalloc.80 canary reclaim spray (device-confirmed UAF)
 NSString *ModJpegClose(void);      // 20687 hidgate-poc jpegclose7 ladder: controlled 10s free + same-type reclaim + persistent stale node (no Camera)
+NSString *ModJpegMethods(void);    // 20687 AppleJPEGDriver selector audit (sel0-sel10, 0x58/0x1000/0xDA0 structs, notify-port drain)
+NSString *ModJpegReclaim(void);    // 20687 kalloc(0x440) OOL reclaim spray: victim->reclaim cycles + 0x440 OOL messages (safe and canary variants)
 // dispatchers
 NSString *RunModule(NSString *name);
 NSString *RunRootPath(NSString *name);

