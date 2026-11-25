@@ -73,3 +73,20 @@ CVE-2026-65330 (PAC bypass #0x307a) ->  PC control -> root (uid=0)
 * Status: the trigger is in RootSuite (8 threads x 40 x 10 async decodes +
   close) and measures the JpegRequest wired-memory leak; the deferred panic
   needs one sync decode afterwards (Camera).
+
+## 6. CVE-2026-20637 - AppleSEPKeyStore UAF, PoC TESTED ON OUR EXACT BUILD (26.1-26.2)
+
+* Public PoC: github.com/zeroxjf/CVE-2026-20687-AppleSEPKeyStore-UAF -
+  "Target Versions: iOS 26.1 - 26.2 (tested)" - exactly our 23C5027f, fixed
+  in 26.3.
+* Apple: AppleKeyStore, use after free, "unexpected system termination".
+* Mechanics: 8 caller threads hammer IOConnectCallMethod on selectors 0-15,
+  4 closer threads race IOServiceClose, the main thread opens 100k
+  connections with rotating types (0x2022/0xbeef/0x1337/0x4141) and NO
+  delay. The PoC's panic: "[iokit.IOCommandGate]: element modified after
+  free" (a freed 80-byte gate element at offset 72).
+* "This PoC immediately kernel-panics affected devices" - on our build this
+  is the most direct trigger.
+* Ported into RootSuite as module "20637 KeyStore UAF"; build e6bb72e
+  (run 45688051653, IPA on the desktop, sha256 A52237A0...83A8C) awaits the
+  device run.
