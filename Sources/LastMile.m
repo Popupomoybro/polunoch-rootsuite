@@ -217,5 +217,6 @@ NSString *RunRootPath(NSString *name) {
     if ([name hasPrefix:@"46285 vm_map wrap"])     return ModVmMapWrap();
     if ([name hasPrefix:@"AIO teardown race"])   return ModAioRace();
     if ([name hasPrefix:@"20687 JPEG UAF"])    return ModJpegUAF();
+    if ([name hasPrefix:@"20637 KeyStore UAF"]) return ModAksUAF();
     return nil;
 }

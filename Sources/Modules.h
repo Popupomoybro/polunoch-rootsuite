@@ -80,6 +80,7 @@ NSString *ModIOGPUUAFOracle(void); // CVE-2026-64788: overflow IOSurface -> stal
 NSString *ModVmMapWrap(void);      // CVE-2025-46285: vm_map timestamp (32-bit) wrap rate measurement
 NSString *ModAioRace(void);        // family B reproducer: aio_workq_entry teardown race (48 panics)
 NSString *ModJpegUAF(void);        // CVE-2026-20687: AppleJPEGDriver startDecoder timeout UAF (public PoC)
+NSString *ModAksUAF(void);         // CVE-2026-20637: AppleSEPKeyStore IOCommandGate UAF (public PoC, tested 26.1-26.2)
 // dispatchers
 NSString *RunModule(NSString *name);
 NSString *RunRootPath(NSString *name);

