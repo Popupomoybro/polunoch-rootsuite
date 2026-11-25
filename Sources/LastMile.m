@@ -219,5 +219,6 @@ NSString *RunRootPath(NSString *name) {
     if ([name hasPrefix:@"20687 JPEG UAF"])    return ModJpegUAF();
     if ([name hasPrefix:@"20637 KeyStore UAF"]) return ModAksUAF();
     if ([name hasPrefix:@"20637 reclaim"])     return ModAksReclaim();
+    if ([name hasPrefix:@"20687 jpegclose"]) return ModJpegClose();
     return nil;
 }

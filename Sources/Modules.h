@@ -82,6 +82,7 @@ NSString *ModAioRace(void);        // family B reproducer: aio_workq_entry teard
 NSString *ModJpegUAF(void);        // CVE-2026-20687: AppleJPEGDriver startDecoder timeout UAF (public PoC)
 NSString *ModAksUAF(void);         // CVE-2026-20637: AppleSEPKeyStore IOCommandGate UAF (public PoC, tested 26.1-26.2)
 NSString *ModAksReclaim(void);     // 20637 + kalloc.80 canary reclaim spray (device-confirmed UAF)
+NSString *ModJpegClose(void);      // 20687 hidgate-poc jpegclose7 ladder: controlled 10s free + same-type reclaim + persistent stale node (no Camera)
 // dispatchers
 NSString *RunModule(NSString *name);
 NSString *RunRootPath(NSString *name);

