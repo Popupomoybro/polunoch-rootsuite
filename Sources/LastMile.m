@@ -218,5 +218,6 @@ NSString *RunRootPath(NSString *name) {
     if ([name hasPrefix:@"AIO teardown race"])   return ModAioRace();
     if ([name hasPrefix:@"20687 JPEG UAF"])    return ModJpegUAF();
     if ([name hasPrefix:@"20637 KeyStore UAF"]) return ModAksUAF();
+    if ([name hasPrefix:@"20637 reclaim"])     return ModAksReclaim();
     return nil;
 }

