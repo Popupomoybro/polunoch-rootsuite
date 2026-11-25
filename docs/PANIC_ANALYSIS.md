@@ -230,3 +230,21 @@ Panic (panic-full-2026-11-25-230422.0002.ips, pulled from the device over USB):
   a reclaim window.
 * Status: UAF confirmed on device; no controlled deref/write yet; root NOT
   achieved (ROOTSTATE NO).
+
+## 16. The 20637 reclaim attempt (25.11 23:32) FAILED - the element is poisoned
+
+Panic: the same "[iokit.IOCommandGate]: element modified after free
+(off:72, val:0xffffffffffffff00, sz:80, ptr:0xffffffeb92b3c1d0)", pid 582
+RootSuite - the trigger fired with the 80-byte canary spray running
+(kalloc.80), but the value did NOT change.
+
+Conclusion: 0xffffffffffffff00 is a tag the KERNEL itself writes on free
+(poison) and verifies on use. The freed element's content cannot be
+controlled through this path - the "modified after free" defence works as
+designed. The reclaim strategy for 20637 is closed.
+
+Alternative (the PoC demonstrates real reclaim): CVE-2026-20687
+AppleJPEGDriver - the PoC states that the MTLBuffer spray occupies the freed
+JpegRequest and the spray data lands in the object's fields (+0x10/+0x24/
++0x28) - i.e. the content IS controlled. Module "20687 JPEG UAF" is built and
+waiting.
