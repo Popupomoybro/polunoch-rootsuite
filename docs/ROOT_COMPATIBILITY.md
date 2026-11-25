@@ -47,3 +47,29 @@ CVE-2026-65330 (PAC bypass #0x307a) ->  PC control -> root (uid=0)
 | Root (uid 0) — не достигнут | VERIFIED (ROOTSTATE NO во всех прогонах) |
 
 **Итог:** инструмент и доказательная база по 112477 превосходят публичный PoC (который только «triggers the UAF and probes groom-reachability»), но root на этой конфигурации не достигнут ни публичным, ни нашим путём.
+
+## 5. NEW (25.11): CVE-2026-20687 - a second kernel hole in OUR build, with a PUBLIC PoC
+
+* Apple (iOS 26.4 security content): Kernel, "An app may be able to cause
+  unexpected system termination or WRITE KERNEL MEMORY", use-after-free,
+  CVE-2026-20687 (Johnny Franks @0xjohnny). Fixed in 26.4 -> our 26.2b1 IS
+  VULNERABLE.
+* Public PoCs (validated by Mallory):
+  * github.com/0xjohnnydev/CVE-2026-20687-AppleJPEGDriver-UAF - AppleJPEGDriver
+    startDecoder() timeout UAF (ported into RootSuite as module "20687 JPEG UAF");
+  * github.com/zeroxjf/CVE-2026-20687-AppleSEPKeyStore-UAF - a second PoC for
+    the same CVE (AppleSEPKeyStore).
+* Mechanics (from the PoC): async decodes (selector 1, struct 0x58,
+  asyncToken != 0) + closing the client with requests in flight -> the freed
+  JpegRequest (0x440 bytes) stays in the codec queue; a later queue walk
+  (finish_io_gated -> fullSpeedRequestExist) reads the stale node -> UAF
+  read/write. In the object +0x00 is a task_t (vtable-style deref = PC
+  control), +0x80 is the self-pointer (first UAF read).
+* Same recon (all affect our build, fixed after 26.2b1): CVE-2026-20626
+  ("a malicious app may be able to gain root privileges", CWE-862, fixed 26.3,
+  no public PoC); CVE-2026-39877 (IOSkywalkFamily memory corruption, fixed
+  26.5 - family B's neighbourhood); CVE-2026-43655 (IOSurfaceAccelerator OOB
+  read, fixed 26.5).
+* Status: the trigger is in RootSuite (8 threads x 40 x 10 async decodes +
+  close) and measures the JpegRequest wired-memory leak; the deferred panic
+  needs one sync decode afterwards (Camera).
