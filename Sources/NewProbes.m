@@ -33,6 +33,7 @@
 #import <time.h>
 #import <errno.h>
 #import <string.h>
+#import <pthread.h>
 #import <objc/runtime.h>
 
 #import "Modules.h"
