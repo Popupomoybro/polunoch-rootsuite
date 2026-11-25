@@ -70,6 +70,9 @@ extern uint32_t IOSurfaceGetID(IOSurfaceRef_ buffer);
 extern void IOSurfaceSetValue(IOSurfaceRef_, CFStringRef, CFTypeRef);
 extern size_t IOSurfaceGetAllocSize(IOSurfaceRef_ buffer);
 extern int IOSurfaceLock(IOSurfaceRef_, uint32_t, uint32_t *);
+// not exported by the SDK umbrella on this toolchain - declared by hand
+extern kern_return_t mach_port_set_qlimit(mach_port_t task, mach_port_t name,
+                                          mach_port_msgcount_t qlimit);
 extern int IOSurfaceUnlock(IOSurfaceRef_, uint32_t, uint32_t *);
 extern void *IOSurfaceGetBaseAddress(IOSurfaceRef_);
 #define kIOSurfaceWidth  CFSTR("IOSurfaceWidth")
