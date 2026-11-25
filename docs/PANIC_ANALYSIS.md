@@ -211,3 +211,22 @@ Backtrace (23.11): `com.apple.AGXG13P (341.11) в†’ com.apple.iokit.IOGPUFam
 ## 14. Тест репродуктора семьи B (25.11) - отрицательный
 
 Модуль `AIO teardown race` (submit aio_read x4 + aio_cancel + close + drain, 24 раунда): запросы реально в очереди (`queued 4/4`), паник нет. Первая версия была сломана (EAGAIN: очередь AIO не дренировалась и забилась после 8 запросов — гонки не происходило). После починного дренажа форма всё равно не воспроизводит — триггер 48 паник другой.
+
+## 15. DEVICE-CONFIRMED KERNEL UAF (25.11 23:04) - CVE-2026-20637
+
+Panic (panic-full-2026-11-25-230422.0002.ips, pulled from the device over USB):
+    panic(cpu 3 caller 0xfffffff00dcff018): [iokit.IOCommandGate]: element modified after free
+      (off:72, val:0xffffffffffffff00, sz:80, ptr:0xffffffe3e7f98590)
+    Panicked task: pid 8450 RootSuite; kext in backtrace: com.apple.driver.AppleSEPKeyStore(2.0)
+
+* Exact reproduction of the public PoC (zeroxjf, CVE-2026-20637, "tested on
+  iOS 26.1-26.2" = our build) on OUR device.
+* Meaning: an 80-byte IOCommandGate element is freed, then read and MODIFIED
+  (the "modified after free" check caught it). This is a UAF with a live
+  freed-element window: the element can potentially be reclaimed by a spray
+  and its content controlled.
+* Unlike families A (0x72418) and B (0x4cff40), which give NULL derefs (the
+  slot reads back zeroed), here the kernel WORKS with the freed element -
+  a reclaim window.
+* Status: UAF confirmed on device; no controlled deref/write yet; root NOT
+  achieved (ROOTSTATE NO).
