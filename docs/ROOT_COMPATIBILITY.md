@@ -90,3 +90,45 @@ CVE-2026-65330 (PAC bypass #0x307a) ->  PC control -> root (uid=0)
 * Ported into RootSuite as module "20637 KeyStore UAF"; build e6bb72e
   (run 45688051653, IPA on the desktop, sha256 A52237A0...83A8C) awaits the
   device run.
+
+## 7. hidgate-poc: the public CONTROL LADDER for CVE-2026-20687 (ported 26.11)
+
+Two repos by hidra0x turn the panic PoC into a measured ladder:
+
+* `hidra0x/hidgate-poc` - the open entry PoC (MOON Probe) plus
+  `experiments/applejpeg/jpegclose*.m`, `jpegreclaim.m`, `jpegspray.m` and
+  `docs/kernel-control.md`.
+* `hidra0x/hidra` - the jailbreak project built on it. Explicitly: "There is
+  no public jailbreak build yet... does not provide kernel read/write today,
+  does not bypass PAC/PPL/SPTM yet".
+
+Their measured ladder (A12 / iOS 18.7.2):
+
+| Level | State | Evidence |
+|---|---|---|
+| L0 crash | PASS | AppleJPEG far=0x308 |
+| L1 deferred JpegRequest UAF | PASS | finish_io_gated reads a freed request |
+| L2 CONTROLLED 10s free | PASS | sync decode (asyncToken=0, flags=0) returns kIOReturnTimeout 0xe00002d6 after 10.001s |
+| L3 same-type reclaim | PASS | 10 async on the same connection right after the timeout reuse the just-freed slot |
+| L4 persistent stale node | PASS | far=0x308 reproduced WITHOUT Camera: close the userclient while a sync decode is in flight |
+| L5 write/read primitive | NOT YET | paired reclaim still misses the slot (x12=0) |
+| L6 PAC/PPL bypass | NOT YET | autda + blraa enforced |
+| L7 kernel r/w + jailbreak | NOT YET | needs L5-L6 |
+
+Why direct PC control is blocked (their analysis): the public PoC's
+`*(*(request+0)+0x28)()` call sits behind `autda x16, x17` + `blraa x8, x17`
+in finish_io_gated - `request->task` cannot be changed by a same-type
+JpegRequest reclaim, so a fake vtable needs a PAC oracle or a kernel read
+first. Their post-write strategy is data-only (process/credential/AMFI/MACF
+data, no kernel text patching).
+
+RootSuite now carries the exact ladder as module "20687 jpegclose" (build
+9529ed1, run 45700127882, RootSuite_jpegclose.ipa on the desktop,
+sha256 457075BE...5B5B): prime -> mass spray 8x100x10 -> early reclaim storm
+(8 connections kept open, codecID = t&3) -> victim sync decode + close
+DURING the sync -> second reclaim storm -> probe cycles -> free one
+reclaimer at a time and probe after each.
+
+Pass criterion on OUR device: a log line `victim sync kr=0xe00002d6
+dt=10.001s` (L2 reached on A14 / 26.2b1) and/or a panic with far=0x308
+without Camera (L4). Neither is root - L5 is the next gate.
