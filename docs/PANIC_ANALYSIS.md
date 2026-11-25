@@ -248,3 +248,52 @@ AppleJPEGDriver - the PoC states that the MTLBuffer spray occupies the freed
 JpegRequest and the spray data lands in the object's fields (+0x10/+0x24/
 +0x28) - i.e. the content IS controlled. Module "20687 JPEG UAF" is built and
 waiting.
+
+## 17. kalloc(0x440) reclaim: the spray was BROKEN (5 messages), and the fix
+
+Device runs of module `20687 kalloc440` (build bdf12cb):
+
+```
+[jpeg440] driver health (sel2): OK
+[jpeg440] wired before: 69060 pages
+[jpeg440]   [25] wired=+1062 victim=125 reclaim=225
+[jpeg440]   [50] wired=+1075 victim=250 reclaim=450
+[jpeg440]   [75] wired=+1075 victim=375 reclaim=675
+[jpeg440]  [100] wired=+1857 victim=500 reclaim=900
+[jpeg440] phase 2 done: victim=250 reclaim=250 spray=5
+[jpeg440] phase 3 done: victim=250 reclaim=250 spray=0
+[jpeg440] wired delta: +6580 pages (the taggedRetain leak)
+[jpeg440] health 4/4, final: OK
+```
+
+### What IS proven
+
+The **taggedRetain leak is real and reproducible on our A14 / 26.2b1**:
+1000 victim async requests -> **+6580 and +7870 wired pages** (~27-31 MB),
+driver healthy throughout. That confirms the PoC's mechanism: each async
+request makes `queue_io_gated` call `taggedRetain` on the userclient,
+`IOServiceClose` sets `isInactive` EARLY (terminatePhase1, before the command
+gate), and in-flight jobs then hit `finish_io_gated`, which sees `isInactive`
+and SKIPS `taggedRelease` - a leaked retain per in-flight job.
+
+### What is NOT proven
+
+The spray sent **5** messages, then **0**. A receive port's queue defaults to
+`MACH_PORT_QLIMIT_DEFAULT = 5`, so `mach_msg` failed immediately after 5 sends.
+**The "reclaim succeeded" verdict from that run was therefore invalid** - the
+spray never sprayed, so nothing could have been reclaimed.
+
+### Fix (commit 62c6464, CI run 45710984611 = success)
+
+`mach_port_set_qlimit` does not link on this toolchain (link error, run
+45709942349), so instead of raising one port's limit the module now uses a
+**pool of 256 receive ports and round-robin**: 256 x 5 = **1280 live 0x440
+allocations** of our data. Verified in the shipped binary: `spray ports:`,
+`live 0x440 allocations`, `first failure kr`. IPA on the Desktop:
+`RootSuite_kalloc440.ipa`, sha256 7F2F23EE...8FA9.
+
+Pass criterion for the next device run: `spray ports: 256` and
+`phase 2 done: ... spray=1000` (NOT spray=5). Then either no panic with a
+healthy driver (PoC oracle: the slot was reclaimed by our data), or a panic
+showing 0xC0FFEE5A in the fault registers (direct proof of controlled
+content).
