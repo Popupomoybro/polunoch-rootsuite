@@ -79,6 +79,7 @@ NSString *ModIsurfUAFAt(int unit); // direct entry at a phase-2 unit (3 = the pa
 NSString *ModIOGPUUAFOracle(void); // CVE-2026-64788: overflow IOSurface -> stale GPU resource entry (oracle, A14-tested PoC)
 NSString *ModVmMapWrap(void);      // CVE-2025-46285: vm_map timestamp (32-bit) wrap rate measurement
 NSString *ModAioRace(void);        // family B reproducer: aio_workq_entry teardown race (48 panics)
+NSString *ModJpegUAF(void);        // CVE-2026-20687: AppleJPEGDriver startDecoder timeout UAF (public PoC)
 // dispatchers
 NSString *RunModule(NSString *name);
 NSString *RunRootPath(NSString *name);

