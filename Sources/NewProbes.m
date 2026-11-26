@@ -885,6 +885,69 @@ NSString *ModJpegMethods(void) {
     AveLog(S(@"[jpegmethods] src=%u dst=%u encSrc=%u encDst=%u jpeg=%zuB",
              srcID, dstID, encSrcID, encDstID, jpeg.length));
 
+    // ---- FULL SELECTOR SWEEP 0..31 ----
+    // The kext's own dispatcher (found in the disassembly) reads the selector at
+    // IOExternalMethodArguments+0xd0 and compares it against values up to 25,
+    // and two bitmasks (0x00091000 and 0x00208000) gate extra selectors - so the
+    // selector space on OUR build is far larger than the sel0-sel10 the public
+    // PoC documented for iOS 18.7.2.  Everything from 11 up is UNPROBED.  Sweep
+    // 0..31 with four shapes: scalar-only, 0x58, 0x1000 and 0xDA0, draining the
+    // notification port after each so any kernel->user data is captured.
+    AveLog(@"[jpegmethods] === FULL SELECTOR SWEEP 0..31 (four shapes) ===");
+    for (uint32_t sel = 0; sel < 32; sel++) {
+        uint64_t sc[6] = {1, 2, 3, 4, 5, 6};
+        uint64_t oc64[8];
+        uint32_t oc = 8;
+        memset(oc64, 0, sizeof oc64);
+        kern_return_t kA = IOConnectCallMethod(conn, sel, sc, 6, NULL, 0,
+                                               oc64, &oc, NULL, NULL);
+        AveLog(S(@"sel%-2u scalar-only   kr=%#x outCnt=%u", sel, kA, oc));
+
+        RSJpegIn b1;
+        RSJpegIn b2;
+        memset(&b1, 0, sizeof b1);
+        memset(&b2, 0, sizeof b2);
+        rs_jm_fill(&b1, srcID, dstID, W, H, 0, 0x6161);
+        size_t osz = sizeof b2;
+        kern_return_t kB = IOConnectCallStructMethod(conn, sel, &b1, sizeof b1, &b2, &osz);
+        AveLog(S(@"sel%-2u struct 0x58   kr=%#x outSize=%zu", sel, kB, osz));
+        if (kB == KERN_SUCCESS && osz > 0)
+            rs_jm_dump(S(@"sel%u 0x58 out", sel), (const uint8_t *)&b2, osz);
+
+        uint8_t *c1 = (uint8_t *)malloc(0x1000);
+        uint8_t *c2 = (uint8_t *)malloc(0x1000);
+        if (c1 && c2) {
+            memset(c1, 0, 0x1000);
+            memset(c2, 0, 0x1000);
+            rs_jm_fill((RSJpegIn *)c1, srcID, dstID, W, H, 0, 0x6161);
+            osz = 0x1000;
+            kern_return_t kC = IOConnectCallStructMethod(conn, sel, c1, 0x1000, c2, &osz);
+            AveLog(S(@"sel%-2u struct 0x1000 kr=%#x outSize=%zu", sel, kC, osz));
+            if (kC == KERN_SUCCESS && osz > 0)
+                rs_jm_dump(S(@"sel%u 0x1000 out", sel), c2, osz);
+        }
+        free(c1);
+        free(c2);
+
+        uint8_t *d1 = (uint8_t *)malloc(0xDA0);
+        uint8_t *d2 = (uint8_t *)malloc(0xDA0);
+        if (d1 && d2) {
+            memset(d1, 0, 0xDA0);
+            memset(d2, 0, 0xDA0);
+            rs_jm_fill((RSJpegIn *)d1, srcID, dstID, W, H, 0, 0x6161);
+            osz = 0xDA0;
+            kern_return_t kD = IOConnectCallStructMethod(conn, sel, d1, 0xDA0, d2, &osz);
+            AveLog(S(@"sel%-2u struct 0xDA0  kr=%#x outSize=%zu", sel, kD, osz));
+            if (kD == KERN_SUCCESS && osz > 0)
+                rs_jm_dump(S(@"sel%u 0xDA0 out", sel), d2, osz);
+        }
+        free(d1);
+        free(d2);
+
+        rs_jm_drain(notify, S(@"sel%u", sel));
+    }
+    AveLog(@"[jpegmethods] === selector sweep done ===");
+
     // ---- the 0x58 decode path (sel1), sync and async ----
     RSJpegIn in1;
     RSJpegIn out1;
