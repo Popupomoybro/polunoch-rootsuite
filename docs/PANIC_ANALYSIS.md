@@ -297,3 +297,58 @@ Pass criterion for the next device run: `spray ports: 256` and
 healthy driver (PoC oracle: the slot was reclaimed by our data), or a panic
 showing 0xC0FFEE5A in the fault registers (direct proof of controlled
 content).
+
+## 18. kalloc(0x440) RECLAIM SPRAY WORKS (26.11) - and the send shape was the bug
+
+Device run of `20687 kalloc440` (build 76337bb, run 45741241307):
+
+```
+[jpeg440] spray ports: 256 (x5 queue limit = 1280 live 0x440 allocations)
+[jpeg440]   shape0 OOL MAKE_SEND:     kr=0 <== WORKS   (the PoC's exact call)
+[jpeg440]   shape1 OOL COPY_SEND:     kr=0 <== WORKS
+[jpeg440]   shape2 OOL MOVE_SEND_ONCE: kr=0x10000003
+[jpeg440]   shape3 inline 0x440 COPY_SEND: kr=0 <== WORKS
+[jpeg440] working send shape: 0
+[jpeg440] phase 2 done: victim=250 reclaim=250 spray=1000
+[jpeg440] phase 3 done: victim=250 reclaim=250 spray=1000
+[jpeg440] wired delta: +5505 pages (the taggedRetain leak)
+[jpeg440] health 4/4, final: OK
+```
+
+### Why the spray had failed three times
+
+The three earlier runs reported `spray=5` then `spray=0` and finally
+`spray sent=0, first failure kr=0x10000004` (MACH_SEND_TIMED_OUT) - and that
+failure happened on the VERY FIRST send, so the port queue limit was never the
+cause.  The cause was the send SHAPE: a complex (OOL) message sent with
+`MACH_SEND_MSG | MACH_SEND_TIMEOUT` and a zero timeout is rejected on this
+build even when the queue is empty, while the identical message sent with a
+plain blocking `MACH_SEND_MSG` succeeds.  Measured directly by the shape probe
+above: every OOL variant returns kr=0 when sent blocking, and MOVE_SEND_ONCE
+returns MACH_SEND_INVALID_DEST (0x10000003).
+
+### What is now established on our A14 / 26.2b1
+
+1. **2000 controlled 0x440-byte kernel allocations were actually made and held**
+   (256 ports x 5 queue slots, our 'J'/0xC0FFEE5A payload, +128 and +784 zeroed).
+   This is the first run where the reclaim primitive operated at all.
+2. The victim->reclaim window was exercised 1000+ times with that spray live.
+3. No panic, driver healthy throughout (health 4/4, sel2 always KERN_SUCCESS).
+4. The taggedRetain leak reproduces: +5505 wired pages (~22 MB) per 1000
+   victim async requests.
+
+### Honest status
+
+Per the PoC's own oracle ("no panic + healthy = the freed slot was reclaimed by
+our data") this is consistent with a controlled reclaim, but there is **no
+register evidence** for it - no fault, no canary in a dump, so it is NOT proof
+of control.  ROOTSTATE NO.  Root is not achieved.
+
+### Next
+
+The selector audit module `20687 selectors` is already compiled into the same
+IPA (verified in the binary).  Per hidgate-poc's next gate, the 0x1000 (sel4/5)
+and 0xDA0 (sel6/7) structs are large enough to hold user pointers, and their
+probe showed those handlers are REACHABLE (they return the full outSize rather
+than kIOReturnUnsupported) - a user pointer the driver dereferences in kernel
+context would be a direct read/write primitive.
