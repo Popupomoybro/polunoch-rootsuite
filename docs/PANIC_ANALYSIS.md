@@ -352,3 +352,45 @@ and 0xDA0 (sel6/7) structs are large enough to hold user pointers, and their
 probe showed those handlers are REACHABLE (they return the full outSize rather
 than kIOReturnUnsupported) - a user pointer the driver dereferences in kernel
 context would be a direct read/write primitive.
+
+## 19. sel5 FIELD MAP: only TWO of 501 slots are validated (26.11)
+
+Device run of `20687 selectors` (build 0b25669):
+
+```
+[jpegmethods] sel5 field map: 501 slots of 8 bytes from +0x58
+[jpegmethods]   VALIDATED slot +0058 -> kr=0xe00002c2
+[jpegmethods]   VALIDATED slot +0078 -> kr=0xe00002c2
+[jpegmethods] sel5 field map done: 2 validated / 499 ignored (of 501 slots)
+```
+
+### What was ruled out first (negative results, worth keeping)
+
+* `sel5 out dump: 4096 bytes` - **all zeros**.  sel5 returns kr=0 and the full
+  4096-byte output, but there is nothing in it: not a read primitive.
+* `notify ... id=53 size=112` decoded completely:
+  `+0000 bits=0x1100 size=0x70`, `+0008 remote=0 local=<our port>`,
+  `+0010 id=0x35(53)`, `+0018 0x0c/0x96`, **`+0028 = 0x6161 = OUR asyncToken**.
+  It is a plain async-completion ack that echoes the token we sent.  No kernel
+  pointers, so no KASLR leak there either.
+* `sel3` encode: 0xe00002bc / 0xe00002d6.  `sel4`: 0xe00002bc at off=0 and
+  0xe00002cc at every other offset.  `sel6/sel7` (0xDA0): 0xe00002bc /
+  0xe00002cc.  `sel8/sel9` privileged: 0xe00002bc.  `sel10`: 0xe00002c2
+  (out of range).  None of them accept anything we send.
+
+### What is now known
+
+sel5 is the only selector besides sel1 that accepts our input.  Of the 501
+8-byte slots past the 0x58 header it validates exactly two: **+0x58** and
+**+0x78** (0x20 apart).  A zeroed rest-of-struct works; any canary in either of
+those two slots yields 0xe00002c2 (kIOReturnBadArgument).
+
+Build c873358 adds a value probe for both slots: powers of two, W*H, W*H*4, a
+kernel-looking value, and a real user buffer address (a 0x1000 buffer pre-filled
+with 0x41).  For every accepted value the module then checks whether the driver
+changed that user buffer - a write there is a direct
+kernel-write-to-user-chosen-address primitive.  IPA: RootSuite_selectors.ipa,
+sha256 55E084BA...5631.
+
+ROOTSTATE NO.  Root is not achieved; this is input-surface mapping, not a
+primitive.
