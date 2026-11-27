@@ -229,6 +229,7 @@ NSString *RunRootPath(NSString *name) {
     if ([name hasPrefix:@"20687 idxprobe"])   return ModJpegIdxProbe();
     if ([name hasPrefix:@"20687 idxwrite"])  return ModJpegIdxWrite();
     if ([name hasPrefix:@"20626 setreuid"])  return ModSetreuidRace();
+    if ([name hasPrefix:@"aio kevent"])     return ModAioKevent();
     if ([name hasPrefix:@"20687 kalloc440"])  return ModJpegReclaim();
     return nil;
 }

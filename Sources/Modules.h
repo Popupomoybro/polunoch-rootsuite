@@ -92,6 +92,7 @@ NSString *ModJpegSweep023(void);   // cumulative sweep sel0..23
 NSString *ModJpegIdxProbe(void);   // which 0x1000 slots does each selector accept (hunting the +0x178 index of the unguarded write)
 NSString *ModJpegIdxWrite(void);   // does +0x178 (the index of the unguarded write) actually do anything?
 NSString *ModSetreuidRace(void);   // CVE-2026-20626: concurrent setreuid race (root-class, our build vulnerable)
+NSString *ModAioKevent(void);      // AIO kevent UAF (device-proven on iOS 26.2 = our kernel family): kernel read via kevent
 NSString *ModJpegReclaim(void);    // 20687 kalloc(0x440) OOL reclaim spray: victim->reclaim cycles + 0x440 OOL messages (safe and canary variants)
 // dispatchers
 NSString *RunModule(NSString *name);
