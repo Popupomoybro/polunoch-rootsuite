@@ -394,3 +394,55 @@ sha256 55E084BA...5631.
 
 ROOTSTATE NO.  Root is not achieved; this is input-surface mapping, not a
 primitive.
+
+## 20. NEW BUG (26.11 16:32): AppleJPEGDriver 7.7.2 assertion panic, sandbox-reachable
+
+`panic-full-2026-11-27-163223.0002.ips` (pulled from the device, 1.4 MB):
+
+```
+panic(cpu 0 caller 0xfffffff0186bfc84): Break 0x0800 instruction exception
+  from kernel. Panic (by design) at pc 0xfffffff0192386dc
+x1: 0x3de  x8: 0x3df  x22: 0x3df  x23: 0x400  far: 0x0000000b68660038
+Panicked task: pid 0 kernel_task (deferred)
+Kernel Extensions in backtrace: com.apple.driver.AppleJPEGDriver(7.7.2)
+```
+
+`brk #0x800` is XNU's panic idiom, so the KEXT called panic - it is not a memory
+fault.  Slide 0x0feac000 maps the panic site to kext+0x27bec, and the loop that
+reaches it is:
+
+```asm
+0xfffffff00938c490  ldr  w8, [x20, #0x54]   ; count   = 4096
+0xfffffff00938c49c  mov  x22, #0            ; i = 0
+0xfffffff00938c4a0  lsr  x23, x8, #2        ; limit   = count >> 2 = 1024
+0xfffffff00938c4a4  ldr  x8, [x20, #0x78]   ; bound   = 991
+0xfffffff00938c4a8  cmp  x8, x22
+0xfffffff00938c4ac  b.ls 0xfffffff00938c6dc ; -> brk #0x800  (991 <= 991)
+0xfffffff00938c4b0  ldr  x8, [x20, #0x70]   ; base
+0xfffffff00938c4b4  add  x8, x8, x22, lsl #2 ; elem = base + i*4
+0xfffffff00938c4b8  ldr  w2, [x8]           ; READ
+```
+
+The loop bound is derived from `obj+0x54 >> 2` while the safety check compares
+against `obj+0x78`.  On this run they disagreed (1024 wanted vs 991 available,
+33 elements short) and Apple's assertion fired instead of reading out of bounds.
+
+### Status: DoS, not a primitive
+
+The check is a fail-safe: reads are effectively bounded by
+min(obj+0x54>>2, obj+0x78), so there is no OOB access on this path.  A full
+search of the kext found 35 `base + i*4` element computations; exactly ONE (this
+one) has a `+0x78` check, and the four structurally identical sites
+(kext+0xebb8, +0x12b00, +0x1fa2c, +0x2729c) are instead guarded by
+`cmp w1, #4 ; b.hs panic`, bounding the index to 0..3 before
+`obj->0x18 + 0x1100 + (w1<<6) + i*4`.  None of them is unguarded.
+
+### What it does establish
+
+* A brand-new, reproducible, sandbox-reachable kernel panic in
+  AppleJPEGDriver 7.7.2 on 23C5027f - reached by the selector sweep, i.e. code
+  the public PoC never touched.
+* The panic proves the sweep reaches deep driver internals, so the sweep is the
+  right instrument.
+
+ROOTSTATE NO.  Root is not achieved; this is a DoS, not a primitive.
