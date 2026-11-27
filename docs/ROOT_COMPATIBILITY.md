@@ -132,3 +132,66 @@ reclaimer at a time and probe after each.
 Pass criterion on OUR device: a log line `victim sync kr=0xe00002d6
 dt=10.001s` (L2 reached on A14 / 26.2b1) and/or a panic with far=0x308
 without Camera (L4). Neither is root - L5 is the next gate.
+
+## 8. CVE-2026-20626 investigated and CLOSED for our app (27.11)
+
+The only CVE Apple itself describes as **"a malicious app may be able to gain root
+privileges"**, in the Kernel component, fixed in iOS 26.3 - our build
+xnu-12377.60.50.502.2 is vulnerable.
+
+### The fix (XNU 12377.41.6 -> 12377.61.12 diff, 112 content-changed files)
+
+`bsd/kern/kern_prot.c`:
+```c
++/* mutex for synchronizing set{,re}uid */
++LCK_MTX_DECLARE_ATTR(setuid_lock, &proc_mlock_grp, &proc_lck_attr);
++	lck_mtx_lock(&setuid_lock);       /* in setuid()   */
++	lck_mtx_unlock(&setuid_lock);     /* and setreuid() */
+```
+`tests/setreuid.c` and `tests/task_security_config.h` were added in the same
+release.  The regression test races two threads of setreuid and asserts that
+`debug.test.proccnt_uid` still reports exactly one process - i.e. the race
+corrupts the per-uid process count, because `chgproccnt()` runs OUTSIDE the
+`kauth_cred_proc_update()` block and both threads compute it from a stale parent.
+`setreuid()`'s own comment says *"We are protected from escalation by the
+prechecking"* - the race breaks exactly that protection.
+
+### The device result (`20626 setreuid`)
+
+```
+[setreuid20626] start: ruid=501 euid=501
+[setreuid20626] probe setreuid(0,0)     [root (0,0)] -> -1  (EPERM)
+[setreuid20626] probe setreuid(0,-1)    [root ruid]  -> -1  (EPERM)
+[setreuid20626] probe setreuid(-1,0)    [root euid]  -> -1  (EPERM)
+[setreuid20626] race done: calls=7008986 errors=0 unexpected-id-changes=0
+[setreuid20626] final: ruid=501 euid=501
+```
+
+7,008,986 concurrent setreuid calls, zero errors, zero unexpected id changes,
+euid still 501.  The `debug.test.proccnt_uid` sysctl does not exist on a release
+build (r=-1), so the count corruption is not even observable.
+
+### Why it does not escalate from our app
+
+The race needs a process that already holds part of the privilege it is juggling
+(ruid/euid/svuid 0 mixed with unprivileged ids).  A sandboxed iOS app runs as
+uid 501 with svuid 501, and every setreuid that touches uid 0 is refused with
+EPERM, so there is no privileged state to race and lose.  Apple's "malicious
+app" scenario is a setuid helper / daemon, not a sandboxed app.
+
+### Net: every public lead on this device is now closed
+
+| CVE / surface | Outcome |
+|---|---|
+| CVE-2026-20637 (AppleSEPKeyStore UAF) | device-confirmed; freed element is poisoned (0xffffffffffffff00), reclaim impossible |
+| CVE-2026-20687 (AppleJPEGDriver) | controlled 10s free CONFIRMED; PC control blocked by PAC (autda/blraa); no reclaim |
+| CVE-2026-20626 (setreuid race) | fix identified exactly; NOT reachable from an unprivileged sandbox (7M calls, 0 effect) |
+| CVE-2025-46285 (vm_map.timestamp) | counter wrapped to 2^32 on device, no observable effect |
+| AppleJPEGDriver sel31 | deterministic assertion panic, but a FAIL-SAFE (DoS) |
+| AppleJPEGDriver +0x178 index | settable, provably inert |
+| selectors 26-31 | all 0xe00002c2 (bad argument) |
+| hidra0x/hidra (public 20687 research) | "no public jailbreak build yet... does not provide kernel read/write today" |
+
+**ROOTSTATE NO.** Root is not achieved, and there is no remaining public,
+sandbox-reachable path to it on iPhone13,1 / 23C5027f with the information
+available.
