@@ -765,6 +765,7 @@ static void rs_jm_fill(RSJpegIn *in, uint32_t srcID, uint32_t dstID,
 // we have ever been able to read, so the content matters more than the kr.
 // Set one 8-byte slot in a valid sel5 request and return the kr.  Used by the
 // threshold probe to pin the accepted range of a field exactly.
+static void rs_jm_dump(NSString *what, const uint8_t *p, size_t len);
 static kern_return_t rs_jm_tryVal(io_connect_t conn, uint32_t slot, uint64_t val,
                                   uint32_t srcID, uint32_t dstID, uint32_t w, uint32_t h) {
     uint8_t *big = (uint8_t *)malloc(0x1000);
