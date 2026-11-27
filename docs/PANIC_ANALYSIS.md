@@ -446,3 +446,52 @@ one) has a `+0x78` check, and the four structurally identical sites
   right instrument.
 
 ROOTSTATE NO.  Root is not achieved; this is a DoS, not a primitive.
+
+## 21. THE PRIMITIVE CANDIDATE: the only UNGUARDED indexed write in the kext
+
+A kext-wide enumeration of every indexed memory access (register index operand,
+not just the `base + i*4` shape) found 17 accesses: 13 writes and 4 reads.
+**Twelve of the thirteen writes carry 3-7 bound checks in the preceding
+instructions. One carries ZERO:**
+
+```asm
+kext+0x174c   str  w22, [x9, w15, uxtw]     guards=0
+```
+
+with, immediately around it:
+
+```asm
+kext+0x1748   ldr  x9, [x20, #0x18]     ; x9 = obj->0x18  (the destination buffer)
+kext+0x174c   str  w22, [x9, w15, uxtw] ; WRITE w22 at obj->0x18 + w15
+kext+0x1750   add  x10, x9, x13         ; x13 = 0x404 or 0x40c (a FIXED offset)
+kext+0x1754   str  w21, [x10]           ; WRITE w21 at obj->0x18 + x13
+kext+0x1758   ldr  w15, [x19, #0xcc]    ; the index comes from obj->0xcc
+```
+
+`w22` is a value that has been through dispatcher C's arithmetic
+(`lsl w22, w22, #2`, `smull` divide-by-3, `and #0xfffffffc` alignment), so it is
+not a constant.
+
+### Where the index comes from - and it is unvalidated
+
+`obj+0xcc` is written by an **unvalidated bulk copy** at kext+0x24ff0:
+
+```asm
+kext+0x24ff4  ldr  w8, [x1, #0x158] ; ldr  x9, [x0, #0x18] ; str w8, [x9, #0xac]
+kext+0x24ff8  ldr  w8, [x1, #0x15c] ;                       str w8, [x9, #0xb0]
+kext+0x25000  ldr  w8, [x1, #0x160] ;                       str w8, [x9, #0xb4]
+   ... 11 consecutive words, no check anywhere ...
+kext+0x25038  ldr  w8, [x1, #0x178] ;                       str w8, [x9, #0xcc]  <-- THE INDEX
+kext+0x25040  ldr  w8, [x1, #0x17c] ;                       str w8, [x9, #0xd0]
+```
+
+So `obj+0xcc` is a verbatim copy of `x1+0x178`.  If `x1` is a
+user-supplied structure, the index of the only unguarded indexed write in
+AppleJPEGDriver is **fully attacker-controlled**, and the write target is
+`obj->0x18 + index`.
+
+### Status
+
+The function at kext+0x24ff0 has no direct `bl`/`b` reference - it is reached
+through a jump table, so identifying `x1` requires tracing that table, which is
+the next step.  Nothing has been exploited; ROOTSTATE NO.
