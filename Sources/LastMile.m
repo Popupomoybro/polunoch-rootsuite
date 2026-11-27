@@ -221,6 +221,7 @@ NSString *RunRootPath(NSString *name) {
     if ([name hasPrefix:@"20637 reclaim"])     return ModAksReclaim();
     if ([name hasPrefix:@"20687 jpegclose"]) return ModJpegClose();
     if ([name hasPrefix:@"20687 selectors"]) return ModJpegMethods();
+    if ([name hasPrefix:@"20687 lastpanic"]) return ModJpegLastPanic();
     if ([name hasPrefix:@"20687 kalloc440"])  return ModJpegReclaim();
     return nil;
 }

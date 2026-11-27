@@ -864,6 +864,22 @@ static void rs_jm_drain(mach_port_t port, NSString *label) {
     }
 }
 
+// Read back the selector that was being attempted when the device last panicked.
+// This makes NO driver calls at all, so it cannot panic - it just reports the
+// marker the sweep writes before every call shape.
+NSString *ModJpegLastPanic(void) {
+    AveLog(@"[jpeglast] === last attempted selector before any kernel panic ===");
+    NSString *last = rs_jm_lastSel();
+    if (last && last.length > 0) {
+        AveLog(S(@"[jpeglast] *** LAST ATTEMPTED: %@ ***", last));
+        AveSetStatus(@"last panic selector shown - see the log");
+        return S(@"last attempted selector before the panic: %@", last);
+    }
+    AveLog(@"[jpeglast] no marker file yet - no panic has been recorded");
+    AveSetStatus(@"no panic marker yet");
+    return @"no marker yet: run 20687 selectors first, then reboot and run this";
+}
+
 NSString *ModJpegMethods(void) {
     AveLog(@"[jpegmethods] === CVE-2026-20687 selector audit (hidgate-poc jpegmethods2 port) ===");
     io_service_t svc = rs_jpeg_service();
