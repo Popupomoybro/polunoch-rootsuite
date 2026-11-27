@@ -195,3 +195,73 @@ app" scenario is a setuid helper / daemon, not a sandboxed app.
 **ROOTSTATE NO.** Root is not achieved, and there is no remaining public,
 sandbox-reachable path to it on iPhone13,1 / 23C5027f with the information
 available.
+
+## 9. THE LEAD: AIO kevent UAF - device-proven on iOS 26.2 / 23C55 (our kernel family)
+
+Found by a full GitHub sweep: `AIOsource/lightsword-iphone-16`.
+
+> "All testing was done on the author's own device: **iPhone 13 (A15, arm64e),
+> T8110), iOS 26.2 / 23C55 (xnu-12377.62.10)**"
+
+xnu-12377.**62**.10 vs our xnu-12377.**60**.50.502.2 - the same XNU branch and the
+same OS release (26.2), i.e. the same kernel surface.
+
+Their `VULNS.txt` status line:
+
+> **AIO KEVENT UAF (track B / "B12") - xnu bsd/kern/vfs/aio.c**
+> Status: **[R] read confirmed on device / [R/W] write requires a zone spray**
+> Access: yes, from an ordinary sandbox app (aio_read + kqueue + kevent64).
+
+### Mechanism (their on-device log Documents/aio_uaf.log)
+
+```
+main:  lio_listio -> enqueue aio_workq_entry E1
+main:  SIGEV_KEVENT in the aiocb -> knote, kn_hook = raw dangling ptr
+racer: aio_return(E1)                        [FREE]
+racer: aio_read(rcb[i]) on the same thread   [RECLAIM the same slot, LIFO]
+kernel: do_aio_completion_and_unlock -> KNOTE(hint=1)
+        -> filt_aioevent: E1->flags & AIO_COMPLETED
+main:  kevent64 -> filt_aioprocess on the DANGLING entry:
+          ext[0] = entry+0x28, ext[1] = entry+0x20, data = 0,
+          TAILQ_REMOVE(+0x10/+0x18), aio_entry_unref(+0x2C),
+          aio_proc_lock(*(+0x40))
+HIT: the kevent is delivered on the reclaimed entry (ext[1] == marker)
+```
+
+So the kernel copies the FREED entry's fields into the kevent and hands them to
+userland: **a kernel read from the app**, and then performs three operations
+THROUGH the entry's own data (`TAILQ_REMOVE`, `aio_entry_unref`,
+`aio_proc_lock`) which become write-what-where / double-free once the slot holds
+a controlled object.
+
+`aio_workq_entry` map (zone `aio_workq_zonep`, ~224 B, zeroed on free):
+`+0x10` aio_proc_link (WRITE: *prev = next), `+0x20` returnval (READ ext[1]),
+`+0x28` errorval (READ ext[0]), `+0x2C` refcount (unref -> double free),
+`+0x40` procp (aio_proc_lock; 0 -> PANIC FAR=0x58), `+0x48` uaiocbp (-> ident),
+`+0x50` aiocb (-> udata).
+
+Two rules they derived the hard way: the reclaim request MUST be SIGEV_NONE (a
+second SIGEV_KEVENT knote makes filt_aioprocess walk the entry twice ->
+procp == 0 -> FAR=0x58), and reap with aio_return, never aio_cancel.
+
+### Why this is our zone
+
+This is the same `aio_workq_entry` teardown that produced our 48 panics
+("aio_workq_entry being freed while still enqueued", pc+0x4cff40) and the same
+family-B reproducer we already had. We simply never read the kevent.
+
+### Ported into RootSuite
+
+Module `aio kevent UAF` (build 73aabd3, run 46064944727, success,
+`RootSuite_aio.ipa` on the Desktop, sha256 582B6BC5...414E1): the B1 trigger
+(free + LIFO reclaim in one thread) and the B2 kevent read over 40 rounds,
+logging every ext[0]/ext[1]/ident/udata and any kernel-looking VA as a KASLR
+anchor.
+
+Pass criterion: `ext[1] == 0x4141` (the spray marker) or `ext[1] == 0x200`
+means the kevent was delivered on the RECLAIMED entry - a confirmed UAF read on
+our build. Next gate after that: a controlled object in `aio_workq_zonep`
+(224 B) to turn TAILQ_REMOVE into write-what-where, aimed at ucred+0x18 (uid).
+
+ROOTSTATE NO. Root is not achieved; this is the first lead with a primitive
+already proven on our kernel family.
