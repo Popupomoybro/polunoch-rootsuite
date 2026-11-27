@@ -226,6 +226,7 @@ NSString *RunRootPath(NSString *name) {
     if ([name hasPrefix:@"20687 sweep 0-7"])  return ModJpegSweep07();
     if ([name hasPrefix:@"20687 sweep 0-15"]) return ModJpegSweep015();
     if ([name hasPrefix:@"20687 sweep 0-23"]) return ModJpegSweep023();
+    if ([name hasPrefix:@"20687 idxprobe"])   return ModJpegIdxProbe();
     if ([name hasPrefix:@"20687 kalloc440"])  return ModJpegReclaim();
     return nil;
 }

