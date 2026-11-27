@@ -495,3 +495,50 @@ AppleJPEGDriver is **fully attacker-controlled**, and the write target is
 The function at kext+0x24ff0 has no direct `bl`/`b` reference - it is reached
 through a jump table, so identifying `x1` requires tracing that table, which is
 the next step.  Nothing has been exploited; ROOTSTATE NO.
+
+## 22. The index candidate is CLOSED (negative result, 27.11)
+
+The chain was: the only unguarded indexed write in the kext is
+`str w22, [x9, w15, uxtw]` at kext+0x174c, its index obj+0xcc is a verbatim copy
+of x1+0x178 (an unvalidated 14-word bulk copy at kext+0x24ff0), and the index
+probe proved that slots +0x148..+0x188 of the 0x1000 input struct are all
+accepted by sel5 with kr=0 - including +0x178 itself (32 accepted pairs:
+sel4 x16, sel5 x16).
+
+The decisive experiment (`20687 idxwrite`) filled the whole copy window
+(+0x158..+0x180) with a 0xC0FF0000 canary, set +0x178 to each of
+0, 4, 0x40, 0x400, 0x1000, 0x10000, 0x100000, 0x7ffffff0, and looked for an
+effect:
+
+```
+[idxwrite] idx +0x178=0x00000000 -> kr=0 outSize=4096
+[idxwrite] idx +0x178=0x00000004 -> kr=0 outSize=4096
+[idxwrite] idx +0x178=0x00000040 -> kr=0 outSize=4096
+[idxwrite] idx +0x178=0x00000400 -> kr=0 outSize=4096
+[idxwrite] idx +0x178=0x00001000 -> kr=0 outSize=4096
+[idxwrite] idx +0x178=0x00010000 -> kr=0 outSize=4096
+[idxwrite] idx +0x178=0x00100000 -> kr=0 outSize=4096
+[idxwrite] idx +0x178=0x7ffffff0 -> kr=0 outSize=4096
+--- no non-zero output, no crash ---
+```
+
+Every value returns kr=0 with an all-zero 4096-byte output and no fault.  So
++0x178 is settable but inert: **x1 in the bulk copy is NOT the user-supplied
+input struct** - it is an internal object, and the index cannot be reached from
+userspace through this path.  The candidate is closed.
+
+### Net assessment of the AppleJPEGDriver surface on 23C5027f
+
+| Lead | Result |
+|---|---|
+| sel1 decode UAF (CVE-2026-20687) | controlled 10s free CONFIRMED; reclaim loop never lands |
+| sel5 +0x58 / +0x78 | 32-bit and 64-bit validated, never dereferenced (24/24 kr=0) |
+| sel5 4096-byte output | all zeros in every run |
+| notification id=53 | plain async-completion ack echoing our asyncToken |
+| sel31 / 0xDA0 | deterministic assertion panic, but a FAIL-SAFE (DoS) |
+| 35 base+i*4 computations | 1 unguarded, but its index is not user-reachable |
+| +0x178 index | settable, provably inert |
+| selectors 26-31 | all 0xe00002c2 (bad argument) |
+
+ROOTSTATE NO.  Root is not achieved, and no user-reachable write or read
+primitive exists in this kext on our build.
