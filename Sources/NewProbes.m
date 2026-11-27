@@ -794,6 +794,31 @@ static kern_return_t rs_jm_tryVal(io_connect_t conn, uint32_t slot, uint64_t val
     return kr;
 }
 
+// Persist the selector we are about to call, so that after a kernel panic and
+// reboot the app can report exactly which selector killed it.  Without this the
+// log dies with the device and the triggering selector is unknowable.
+static void rs_jm_markSel(uint32_t sel, int shape) {
+    NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                         NSUserDomainMask, YES) firstObject];
+    if (!dir) return;
+    NSString *path = [dir stringByAppendingPathComponent:@"lastsel.txt"];
+    NSString *s = [NSString stringWithFormat:@"sel=%u shape=%d\n", sel, shape];
+    @try {
+        [s writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } @catch (NSException *e) {
+    }
+}
+
+static NSString *rs_jm_lastSel(void) {
+    NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                         NSUserDomainMask, YES) firstObject];
+    if (!dir) return nil;
+    NSString *path = [dir stringByAppendingPathComponent:@"lastsel.txt"];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return nil;
+    NSString *s = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    return s;
+}
+
 static void rs_jm_dump(NSString *what, const uint8_t *p, size_t len) {
     if (!p || len < 8) return;
     size_t n = len > 512 ? 512 : len;
@@ -907,11 +932,15 @@ NSString *ModJpegMethods(void) {
     // 0..31 with four shapes: scalar-only, 0x58, 0x1000 and 0xDA0, draining the
     // notification port after each so any kernel->user data is captured.
     AveLog(@"[jpegmethods] === FULL SELECTOR SWEEP 0..31 (four shapes) ===");
+    NSString *last = rs_jm_lastSel();
+    if (last && last.length > 0)
+        AveLog(S(@"[jpegmethods] *** LAST ATTEMPTED BEFORE ANY PANIC: %@ ***", last));
     for (uint32_t sel = 0; sel < 32; sel++) {
         uint64_t sc[6] = {1, 2, 3, 4, 5, 6};
         uint64_t oc64[8];
         uint32_t oc = 8;
         memset(oc64, 0, sizeof oc64);
+        rs_jm_markSel(sel, 0);
         kern_return_t kA = IOConnectCallMethod(conn, sel, sc, 6, NULL, 0,
                                                oc64, &oc, NULL, NULL);
         AveLog(S(@"sel%-2u scalar-only   kr=%#x outCnt=%u", sel, kA, oc));
@@ -922,6 +951,7 @@ NSString *ModJpegMethods(void) {
         memset(&b2, 0, sizeof b2);
         rs_jm_fill(&b1, srcID, dstID, W, H, 0, 0x6161);
         size_t osz = sizeof b2;
+        rs_jm_markSel(sel, 1);
         kern_return_t kB = IOConnectCallStructMethod(conn, sel, &b1, sizeof b1, &b2, &osz);
         AveLog(S(@"sel%-2u struct 0x58   kr=%#x outSize=%zu", sel, kB, osz));
         if (kB == KERN_SUCCESS && osz > 0)
@@ -934,6 +964,7 @@ NSString *ModJpegMethods(void) {
             memset(c2, 0, 0x1000);
             rs_jm_fill((RSJpegIn *)c1, srcID, dstID, W, H, 0, 0x6161);
             osz = 0x1000;
+            rs_jm_markSel(sel, 2);
             kern_return_t kC = IOConnectCallStructMethod(conn, sel, c1, 0x1000, c2, &osz);
             AveLog(S(@"sel%-2u struct 0x1000 kr=%#x outSize=%zu", sel, kC, osz));
             if (kC == KERN_SUCCESS && osz > 0)
@@ -949,6 +980,7 @@ NSString *ModJpegMethods(void) {
             memset(d2, 0, 0xDA0);
             rs_jm_fill((RSJpegIn *)d1, srcID, dstID, W, H, 0, 0x6161);
             osz = 0xDA0;
+            rs_jm_markSel(sel, 3);
             kern_return_t kD = IOConnectCallStructMethod(conn, sel, d1, 0xDA0, d2, &osz);
             AveLog(S(@"sel%-2u struct 0xDA0  kr=%#x outSize=%zu", sel, kD, osz));
             if (kD == KERN_SUCCESS && osz > 0)
