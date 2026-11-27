@@ -90,6 +90,7 @@ NSString *ModJpegSweep07(void);    // cumulative sweep sel0..7   (bisect the pan
 NSString *ModJpegSweep015(void);   // cumulative sweep sel0..15
 NSString *ModJpegSweep023(void);   // cumulative sweep sel0..23
 NSString *ModJpegIdxProbe(void);   // which 0x1000 slots does each selector accept (hunting the +0x178 index of the unguarded write)
+NSString *ModJpegIdxWrite(void);   // does +0x178 (the index of the unguarded write) actually do anything?
 NSString *ModJpegReclaim(void);    // 20687 kalloc(0x440) OOL reclaim spray: victim->reclaim cycles + 0x440 OOL messages (safe and canary variants)
 // dispatchers
 NSString *RunModule(NSString *name);

