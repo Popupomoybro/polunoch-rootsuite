@@ -1517,7 +1517,7 @@ NSString *ModAioKevent(void) {
         attempts++;
 
         // racer: free then reclaim, in this same thread (same CPU -> LIFO)
-        volatile int done = 0;
+        __block volatile int done = 0;
         __block int issued = 0;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
             for (int spin = 0; spin < 20000 && !done; spin++) {
