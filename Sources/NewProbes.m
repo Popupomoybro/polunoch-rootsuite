@@ -21,6 +21,12 @@
 //    It churns one map (mmap/munmap pairs in the same range), logs the rate,
 //    and is resumable across launches via the forensic file.
 // ---------------------------------------------------------------------------
+// Apple's <aio.h> and <sys/event.h> hide struct aiocb / struct kevent64_s
+// behind __DARWIN_C_LEVEL guards; opening them here is what makes the AIO
+// kevent UAF module compile.
+#define _DARWIN_C_SOURCE 1
+#import <aio.h>
+#import <sys/event.h>
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <mach/mach.h>
