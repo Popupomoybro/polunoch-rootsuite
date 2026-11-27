@@ -34,6 +34,7 @@
 #import <errno.h>
 #import <string.h>
 #import <pthread.h>
+#import <sys/sysctl.h>
 #import <objc/runtime.h>
 
 #import "Modules.h"
