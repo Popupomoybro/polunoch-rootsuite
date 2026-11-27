@@ -85,6 +85,7 @@ NSString *ModAksReclaim(void);     // 20637 + kalloc.80 canary reclaim spray (de
 NSString *ModJpegClose(void);      // 20687 hidgate-poc jpegclose7 ladder: controlled 10s free + same-type reclaim + persistent stale node (no Camera)
 NSString *ModJpegMethods(void);    // 20687 AppleJPEGDriver selector audit (sel0-sel10, 0x58/0x1000/0xDA0 structs, notify-port drain)
 NSString *ModJpegLastPanic(void);  // read back the selector being attempted at the last kernel panic (no driver calls, cannot panic)
+NSString *ModJpegSel31(void);      // focused probe of sel31 / 0xDA0 - the selector that panics
 NSString *ModJpegReclaim(void);    // 20687 kalloc(0x440) OOL reclaim spray: victim->reclaim cycles + 0x440 OOL messages (safe and canary variants)
 // dispatchers
 NSString *RunModule(NSString *name);

