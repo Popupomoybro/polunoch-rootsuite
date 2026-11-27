@@ -86,6 +86,9 @@ NSString *ModJpegClose(void);      // 20687 hidgate-poc jpegclose7 ladder: contr
 NSString *ModJpegMethods(void);    // 20687 AppleJPEGDriver selector audit (sel0-sel10, 0x58/0x1000/0xDA0 structs, notify-port drain)
 NSString *ModJpegLastPanic(void);  // read back the selector being attempted at the last kernel panic (no driver calls, cannot panic)
 NSString *ModJpegSel31(void);      // focused probe of sel31 / 0xDA0 - the selector that panics
+NSString *ModJpegSweep07(void);    // cumulative sweep sel0..7   (bisect the panic's root cause)
+NSString *ModJpegSweep015(void);   // cumulative sweep sel0..15
+NSString *ModJpegSweep023(void);   // cumulative sweep sel0..23
 NSString *ModJpegReclaim(void);    // 20687 kalloc(0x440) OOL reclaim spray: victim->reclaim cycles + 0x440 OOL messages (safe and canary variants)
 // dispatchers
 NSString *RunModule(NSString *name);

